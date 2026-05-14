@@ -643,15 +643,15 @@ pub(crate) fn mix_sounds(
                     sound.volume
                 };
 
-                let mut out_left = left * effective_volume * spatial_volume;
-                let mut out_right = right * effective_volume * spatial_volume;
+                // Apply pan using constant-power panning (matches SIMD fast path formula)
+                // Linear panning here would cause a ~3dB amplitude jump when transitioning
+                // from the SIMD fast path (e.g. at fade start), producing an audible click.
+                let pan_angle = (spatial_pan + 1.0) * 0.25 * std::f32::consts::PI;
+                let left_pan = pan_angle.cos();
+                let right_pan = pan_angle.sin();
 
-                // Apply pan
-                if spatial_pan < 0.0 {
-                    out_right *= 1.0 + spatial_pan;
-                } else if spatial_pan > 0.0 {
-                    out_left *= 1.0 - spatial_pan;
-                }
+                let out_left = left * effective_volume * spatial_volume * left_pan;
+                let out_right = right * effective_volume * spatial_volume * right_pan;
 
                 // Mix into output
                 let out_idx = frame_idx * channels;

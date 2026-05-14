@@ -667,6 +667,28 @@ impl AudioEngine {
     /// # Ok(())
     /// # }
     /// ```
+    /// Check whether a sample is already in the cache (without triggering a load).
+    ///
+    /// Useful for skipping redundant `register_sample` calls from external code.
+    pub fn is_sample_cached(&self, path: &str) -> bool {
+        self.sample_cache.contains_key(path)
+    }
+
+    /// Insert an already-decoded [`Sample`] into the cache under `path`.
+    ///
+    /// If an entry for `path` already exists it is **not** replaced (same
+    /// semantics as `preload_sample`).  This allows Bevy (or any other asset
+    /// pipeline) to hand a decoded sample to the engine so the next
+    /// `play_sample(path)` call is an O(1) cache hit.
+    pub fn register_sample(&self, path: impl Into<String>, sample: Sample) {
+        self.sample_cache.entry(path.into()).or_insert(sample);
+    }
+
+    /// Return the number of samples currently held in the cache.
+    pub fn cached_sample_count(&self) -> usize {
+        self.sample_cache.len()
+    }
+
     pub fn remove_cached_sample(&self, path: &str) -> Result<()> {
         self.sample_cache.remove(path);
         Ok(())

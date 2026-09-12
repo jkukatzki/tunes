@@ -122,7 +122,7 @@ impl Mixer {
     /// # Returns
     /// A Vec of f32 samples in interleaved stereo format (left, right, left, right...)
     pub fn render_to_buffer(&mut self, sample_rate: f32) -> Vec<f32> {
-        let duration = self.total_duration();
+        let duration = self.playback_duration();
         let total_samples = (duration * sample_rate).ceil() as usize;
 
         // 🚀 KEY OPTIMIZATION: Pre-render all unique notes before streaming

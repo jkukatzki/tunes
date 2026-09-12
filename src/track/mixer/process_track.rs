@@ -104,6 +104,7 @@ impl Mixer {
         cache: Option<&Arc<SampleCache>>,
         #[cfg(feature = "gpu")] gpu_synthesizer: Option<&Arc<GpuSynthesizer>>,
         prerendered: bool,
+        allow_cache_render: bool,
     ) {
         // Clear output buffer
         buffer.fill(0.0);
@@ -127,7 +128,7 @@ impl Mixer {
 
         // Binary search ONCE to find events that might be active during this block
         // We need to search at the start of the block
-        let (start_idx, end_idx) = track.find_active_range(start_time);
+        let (start_idx, end_idx) = track.find_active_range_until(start_time, block_end_time);
 
         // OPTIMIZED: Lock-free cache operations with DashMap
         // No mutex overhead - concurrent cache access from Rayon threads!
@@ -149,7 +150,7 @@ impl Mixer {
                     let cache_key = CacheKey::from_note_event(note_event, sample_rate);
 
                     // Step 1: Handle cache miss (render if needed)
-                    if !prerendered && cache_ref.get(&cache_key).is_none() {
+                    if allow_cache_render && !prerendered && cache_ref.get(&cache_key).is_none() {
                         let total_duration =
                             note_event.envelope.total_duration(note_event.duration);
 
@@ -242,11 +243,12 @@ impl Mixer {
 
         // Pre-render sample events with SIMD for better performance
         // This processes whole blocks instead of per-sample, enabling vectorization
-        let mut sample_buffer = vec![0.0f32; buffer.len()];
+        track.sample_scratch_buffer.resize(buffer.len(), 0.0);
+        track.sample_scratch_buffer.fill(0.0);
         for event in &track.events[start_idx..end_idx] {
             if let AudioEvent::Sample(sample_event) = event {
                 sample_event.sample.fill_buffer_simd_mono(
-                    &mut sample_buffer,
+                    &mut track.sample_scratch_buffer,
                     sample_event.start_time,
                     start_time,
                     time_delta,
@@ -256,9 +258,8 @@ impl Mixer {
             }
         }
 
-        // Pre-allocate drum voice stealing map once — reused across all samples via .clear()
-        // Avoids a HashMap::new() (heap allocation) on every sample frame
-        let mut latest_drum_starts: HashMap<DrumType, f32> = HashMap::with_capacity(8);
+        // Reuse drum bookkeeping across blocks; synth-only tracks allocate nothing.
+        let latest_drum_starts = &mut track.drum_starts;
 
         // For each sample in the block
         for (i, sample_out) in buffer.iter_mut().enumerate() {
@@ -458,7 +459,7 @@ impl Mixer {
             }
 
             // Add pre-rendered samples (processed with SIMD above)
-            track_value += sample_buffer[i];
+            track_value += track.sample_scratch_buffer[i];
 
             // Note: Cached notes are already in track_value (read from buffer at loop start)
 

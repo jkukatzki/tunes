@@ -22,6 +22,10 @@ mod active_sound;
 mod callback;
 mod commands;
 mod sample_builder;
+mod sound_pool;
+mod output_limiter;
+#[cfg(test)]
+mod tests;
 #[cfg(not(target_arch = "wasm32"))]
 mod streaming;
 
@@ -191,6 +195,8 @@ impl AudioEngine {
         // Error handler
         let err_fn = |err| eprintln!("Audio stream error: {}", err);
 
+        let mut output_limiter = output_limiter::OutputLimiter::new();
+
         // Build the persistent output stream
         let stream = device
             .build_output_stream(
@@ -273,17 +279,14 @@ impl AudioEngine {
                         playing_states_for_stream.remove(&id);
                     }
 
-                    // Trim trailing empty slots so the Vec doesn't grow unboundedly over a session
-                    while matches!(active_sounds.last(), Some(None)) {
-                        active_sounds.pop();
-                    }
-
                     // Mix streaming sounds into the output buffer
                     #[cfg(not(target_arch = "wasm32"))]
                     mix_streaming_sounds(data, streaming_sounds, finished_streams, channels);
 
-                    // Call monitor callback if set (for visualization/analysis)
-                    if let Ok(callback_guard) = monitor_callback_for_stream.lock() {
+                    output_limiter.process(data, channels, sample_rate);
+
+                    // Visualization must never wait for UI-side callback registration.
+                    if let Ok(callback_guard) = monitor_callback_for_stream.try_lock() {
                         if let Some(ref callback) = *callback_guard {
                             callback(data);
                         }
@@ -413,10 +416,8 @@ impl AudioEngine {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
 
         // Clone mixer and automatically enable GPU if engine was created with GPU support
-        #[cfg(feature = "gpu")]
         let mut mixer_clone = mixer.clone();
-        #[cfg(not(feature = "gpu"))]
-        let mixer_clone = mixer.clone();
+        mixer_clone.prepare_realtime(self.buffer_size as usize);
 
         #[cfg(feature = "gpu")]
         if self.enable_gpu_for_samples {
@@ -535,10 +536,8 @@ impl AudioEngine {
         self.playing_states.insert(id, ());
 
         // Clone mixer and automatically enable GPU if engine was created with GPU support
-        #[cfg(feature = "gpu")]
         let mut mixer_clone = mixer.clone();
-        #[cfg(not(feature = "gpu"))]
-        let mixer_clone = mixer.clone();
+        mixer_clone.prepare_realtime(self.buffer_size as usize);
 
         #[cfg(feature = "gpu")]
         if self.enable_gpu_for_samples {

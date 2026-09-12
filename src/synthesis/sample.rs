@@ -491,11 +491,12 @@ impl Sample {
     ) -> usize {
         
 
-        // Calculate time offset into this sample
-        let time_offset = current_time - start_time;
-        if time_offset < 0.0 {
-            return 0; // Sample hasn't started yet
-        }
+        // Leave the prefix untouched when the onset falls inside this block.
+        let first_frame = (((start_time - current_time) / time_delta).ceil().max(0.0) as usize)
+            .min(buffer.len());
+        if first_frame == buffer.len() { return 0; }
+        let time_offset = (current_time + first_frame as f32 * time_delta - start_time).max(0.0);
+        let buffer = &mut buffer[first_frame..];
 
         let sample_duration = self.duration / playback_rate;
         if time_offset >= sample_duration {

@@ -4,14 +4,13 @@
 
 use super::active_sound::ActiveSound;
 use super::commands::{AudioCommand, SoundId};
-use dashmap::DashMap;
+use super::sound_pool::SoundPool;
 #[cfg(not(target_arch = "wasm32"))]
 use super::streaming::StreamingSound;
 use crate::synthesis::simd::{SimdWidth, SIMD};
-use crate::synthesis::spatial::{
-    ListenerConfig, SpatialParams, Vec3, calculate_spatial_with_cone,
-};
+use crate::synthesis::spatial::{calculate_spatial_with_cone, ListenerConfig, SpatialParams, Vec3};
 use crossbeam::epoch::{self, Atomic, Owned};
+use dashmap::DashMap;
 use ringbuf::{traits::Split, HeapRb};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -19,17 +18,16 @@ use std::sync::Arc;
 use std::thread;
 use wide::f32x8;
 
-/// Audio callback state (allocation-free mixing)
+/// Audio callback state with reusable mixing buffers
 ///
 /// Holds pre-allocated buffers to avoid allocations in the real-time audio thread.
 /// All buffers are reused across callback invocations.
 pub(crate) struct AudioCallbackState {
-    /// Active sounds being mixed (sparse vector indexed by SoundId for cache-friendly iteration)
-    /// Uses Vec<Option<>> instead of HashMap for sequential memory access (better cache locality)
-    pub active_sounds: Vec<Option<ActiveSound>>,
+    /// Active sounds packed together, independent of monotonically increasing SoundIds
+    pub active_sounds: SoundPool<ActiveSound>,
     /// Streaming sounds (separate from pre-rendered sounds, native only)
     #[cfg(not(target_arch = "wasm32"))]
-    pub streaming_sounds: Vec<Option<StreamingSound>>,
+    pub streaming_sounds: SoundPool<StreamingSound>,
     /// Pre-allocated temp buffer for mixing (stereo interleaved)
     /// Size is determined by the maximum buffer size we expect
     pub temp_buffer: Vec<f32>,
@@ -44,9 +42,9 @@ impl AudioCallbackState {
     pub fn new() -> Self {
         Self {
             // Pre-allocate space for 128 concurrent sounds (typical max for games)
-            active_sounds: Vec::with_capacity(128),
+            active_sounds: SoundPool::with_capacity(128),
             #[cfg(not(target_arch = "wasm32"))]
-            streaming_sounds: Vec::with_capacity(16),
+            streaming_sounds: SoundPool::with_capacity(16),
             // Pre-allocate for a reasonably large buffer (2048 frames stereo = 4096 samples)
             temp_buffer: vec![0.0; 4096],
             finished_sounds: Vec::with_capacity(16),
@@ -67,8 +65,8 @@ impl AudioCallbackState {
 /// Handle commands from the main thread (called from audio thread)
 pub(crate) fn handle_command(
     cmd: AudioCommand,
-    active_sounds: &mut Vec<Option<ActiveSound>>,
-    #[cfg(not(target_arch = "wasm32"))] streaming_sounds: &mut Vec<Option<StreamingSound>>,
+    active_sounds: &mut SoundPool<ActiveSound>,
+    #[cfg(not(target_arch = "wasm32"))] streaming_sounds: &mut SoundPool<StreamingSound>,
     listener_atomic: &Arc<Atomic<ListenerConfig>>,
     spatial_atomic: &Arc<Atomic<SpatialParams>>,
     sample_rate: f32,
@@ -76,62 +74,46 @@ pub(crate) fn handle_command(
 ) {
     match cmd {
         AudioCommand::Play { id, mixer, looping } => {
-            // Ensure Vec has enough capacity (sparse vector indexed by SoundId)
-            let index = id as usize;
-            while active_sounds.len() <= index {
-                active_sounds.push(None);
-            }
-
-            active_sounds[index] = Some(ActiveSound::new(*mixer, looping));
+            active_sounds.insert(id, ActiveSound::new(*mixer, looping));
         }
         AudioCommand::Stop { id } => {
-            let index = id as usize;
-            if index < active_sounds.len() {
-                active_sounds[index] = None;
-            }
+            active_sounds.remove(id);
             playing_states.remove(&id);
         }
         AudioCommand::SetVolume { id, volume } => {
-            let index = id as usize;
-            if let Some(Some(sound)) = active_sounds.get_mut(index) {
+            if let Some(sound) = active_sounds.get_mut(id) {
                 sound.volume = volume.clamp(0.0, 1.0);
             }
         }
         AudioCommand::SetPan { id, pan } => {
-            let index = id as usize;
-            if let Some(Some(sound)) = active_sounds.get_mut(index) {
+            if let Some(sound) = active_sounds.get_mut(id) {
                 sound.pan = pan.clamp(-1.0, 1.0);
             }
         }
         AudioCommand::SetPlaybackRate { id, rate } => {
-            let index = id as usize;
-            if let Some(Some(sound)) = active_sounds.get_mut(index) {
+            if let Some(sound) = active_sounds.get_mut(id) {
                 // Clamp to reasonable range (0.1x to 4.0x speed)
                 sound.playback_rate = rate.clamp(0.1, 4.0);
             }
         }
         AudioCommand::Pause { id } => {
-            let index = id as usize;
-            if let Some(Some(sound)) = active_sounds.get_mut(index) {
+            if let Some(sound) = active_sounds.get_mut(id) {
                 sound.paused = true;
             }
         }
         AudioCommand::Resume { id } => {
-            let index = id as usize;
-            if let Some(Some(sound)) = active_sounds.get_mut(index) {
+            if let Some(sound) = active_sounds.get_mut(id) {
                 sound.paused = false;
             }
         }
         AudioCommand::SetSoundPosition { id, position } => {
-            let index = id as usize;
-            if let Some(Some(sound)) = active_sounds.get_mut(index) {
+            if let Some(sound) = active_sounds.get_mut(id) {
                 sound.spatial_position = Some(position);
                 sound.spatial_dirty = true; // Mark for recalculation
             }
         }
         AudioCommand::SetSoundVelocity { id, vx, vy, vz } => {
-            let index = id as usize;
-            if let Some(Some(sound)) = active_sounds.get_mut(index) {
+            if let Some(sound) = active_sounds.get_mut(id) {
                 if let Some(pos) = &mut sound.spatial_position {
                     pos.set_velocity(vx, vy, vz);
                 }
@@ -140,8 +122,12 @@ pub(crate) fn handle_command(
         AudioCommand::SetListenerPosition { x, y, z } => {
             // Lock-free update: load, clone, modify, store
             let guard = epoch::pin();
-            let current =
-                unsafe { listener_atomic.load(Ordering::Acquire, &guard).as_ref().unwrap() };
+            let current = unsafe {
+                listener_atomic
+                    .load(Ordering::Acquire, &guard)
+                    .as_ref()
+                    .unwrap()
+            };
             let mut new_config = *current;
             new_config.position.x = x;
             new_config.position.y = y;
@@ -150,8 +136,12 @@ pub(crate) fn handle_command(
         }
         AudioCommand::SetListenerVelocity { vx, vy, vz } => {
             let guard = epoch::pin();
-            let current =
-                unsafe { listener_atomic.load(Ordering::Acquire, &guard).as_ref().unwrap() };
+            let current = unsafe {
+                listener_atomic
+                    .load(Ordering::Acquire, &guard)
+                    .as_ref()
+                    .unwrap()
+            };
             let mut new_config = *current;
             new_config.velocity.x = vx;
             new_config.velocity.y = vy;
@@ -160,8 +150,12 @@ pub(crate) fn handle_command(
         }
         AudioCommand::SetListenerForward { x, y, z } => {
             let guard = epoch::pin();
-            let current =
-                unsafe { listener_atomic.load(Ordering::Acquire, &guard).as_ref().unwrap() };
+            let current = unsafe {
+                listener_atomic
+                    .load(Ordering::Acquire, &guard)
+                    .as_ref()
+                    .unwrap()
+            };
             let mut new_config = *current;
             new_config.forward = Vec3::new(x, y, z).normalize();
             listener_atomic.store(Owned::new(new_config), Ordering::Release);
@@ -171,40 +165,34 @@ pub(crate) fn handle_command(
             spatial_atomic.store(Owned::new(params), Ordering::Release);
         }
         AudioCommand::SetSoundCone { id, cone } => {
-            let index = id as usize;
-            if let Some(Some(sound)) = active_sounds.get_mut(index) {
+            if let Some(sound) = active_sounds.get_mut(id) {
                 sound.spatial_cone = cone;
                 sound.spatial_dirty = true; // Mark for recalculation
             }
         }
         AudioCommand::SetSoundOcclusion { id, occlusion } => {
-            let index = id as usize;
-            if let Some(Some(sound)) = active_sounds.get_mut(index) {
+            if let Some(sound) = active_sounds.get_mut(id) {
                 sound.occlusion = occlusion.clamp(0.0, 1.0);
                 sound.spatial_dirty = true; // Mark for recalculation
             }
         }
         AudioCommand::PauseAll => {
-            for sound in active_sounds.iter_mut().flatten() {
+            for (_, sound) in active_sounds.iter_mut() {
                 sound.paused = true;
             }
         }
         AudioCommand::ResumeAll => {
-            for sound in active_sounds.iter_mut().flatten() {
+            for (_, sound) in active_sounds.iter_mut() {
                 sound.paused = false;
             }
         }
         AudioCommand::StopAll => {
-            active_sounds.iter_mut().for_each(|slot| *slot = None); // Clear all slots
+            active_sounds.clear();
             playing_states.clear();
         }
         AudioCommand::FadeOut { id, duration } => {
-            let index = id as usize;
-            if let Some(Some(sound)) = active_sounds.get_mut(index) {
-                sound.fade_start_time = Some(sound.elapsed_time);
-                sound.fade_duration = duration;
-                sound.fade_start_volume = sound.volume;
-                sound.fade_target_volume = 0.0;
+            if let Some(sound) = active_sounds.get_mut(id) {
+                sound.start_fade(duration, 0.0, true);
             }
         }
         AudioCommand::FadeIn {
@@ -212,12 +200,8 @@ pub(crate) fn handle_command(
             duration,
             target_volume,
         } => {
-            let index = id as usize;
-            if let Some(Some(sound)) = active_sounds.get_mut(index) {
-                sound.fade_start_time = Some(sound.elapsed_time);
-                sound.fade_duration = duration;
-                sound.fade_start_volume = sound.volume;
-                sound.fade_target_volume = target_volume.clamp(0.0, 1.0);
+            if let Some(sound) = active_sounds.get_mut(id) {
+                sound.start_fade(duration, target_volume.clamp(0.0, 1.0), false);
             }
         }
         AudioCommand::TweenPan {
@@ -225,9 +209,8 @@ pub(crate) fn handle_command(
             target_pan,
             duration,
         } => {
-            let index = id as usize;
-            if let Some(Some(sound)) = active_sounds.get_mut(index) {
-                sound.pan_tween_start_time = Some(sound.elapsed_time);
+            if let Some(sound) = active_sounds.get_mut(id) {
+                sound.pan_tween_start_time = Some(sound.control_time);
                 sound.pan_tween_duration = duration;
                 sound.pan_tween_start_value = sound.pan;
                 sound.pan_tween_target_value = target_pan.clamp(-1.0, 1.0);
@@ -238,9 +221,8 @@ pub(crate) fn handle_command(
             target_rate,
             duration,
         } => {
-            let index = id as usize;
-            if let Some(Some(sound)) = active_sounds.get_mut(index) {
-                sound.rate_tween_start_time = Some(sound.elapsed_time);
+            if let Some(sound) = active_sounds.get_mut(id) {
+                sound.rate_tween_start_time = Some(sound.control_time);
                 sound.rate_tween_duration = duration;
                 sound.rate_tween_start_value = sound.playback_rate;
                 sound.rate_tween_target_value = target_rate.max(0.1); // Prevent division by zero
@@ -277,55 +259,45 @@ pub(crate) fn handle_command(
                 );
             });
 
-            // Add to streaming sounds (sparse vector)
-            let index = id as usize;
-            while streaming_sounds.len() <= index {
-                streaming_sounds.push(None);
-            }
-
-            streaming_sounds[index] = Some(StreamingSound {
-                ring_consumer,
-                decoder_thread: Some(decoder_thread),
-                stop_signal,
-                pause_signal,
-                volume,
-                pan,
-                looping,
-            });
+            streaming_sounds.insert(
+                id,
+                StreamingSound {
+                    ring_consumer,
+                    decoder_thread: Some(decoder_thread),
+                    stop_signal,
+                    pause_signal,
+                    volume,
+                    pan,
+                    looping,
+                },
+            );
         }
         #[cfg(not(target_arch = "wasm32"))]
         AudioCommand::StopStream { id } => {
             // Setting to None will trigger Drop, which signals thread to stop
-            let index = id as usize;
-            if index < streaming_sounds.len() {
-                streaming_sounds[index] = None;
-            }
+            streaming_sounds.remove(id);
         }
         #[cfg(not(target_arch = "wasm32"))]
         AudioCommand::PauseStream { id } => {
-            let index = id as usize;
-            if let Some(Some(stream)) = streaming_sounds.get_mut(index) {
+            if let Some(stream) = streaming_sounds.get_mut(id) {
                 stream.pause_signal.store(true, Ordering::Relaxed);
             }
         }
         #[cfg(not(target_arch = "wasm32"))]
         AudioCommand::ResumeStream { id } => {
-            let index = id as usize;
-            if let Some(Some(stream)) = streaming_sounds.get_mut(index) {
+            if let Some(stream) = streaming_sounds.get_mut(id) {
                 stream.pause_signal.store(false, Ordering::Relaxed);
             }
         }
         #[cfg(not(target_arch = "wasm32"))]
         AudioCommand::SetStreamVolume { id, volume } => {
-            let index = id as usize;
-            if let Some(Some(stream)) = streaming_sounds.get_mut(index) {
+            if let Some(stream) = streaming_sounds.get_mut(id) {
                 stream.volume = volume.clamp(0.0, 1.0);
             }
         }
         #[cfg(not(target_arch = "wasm32"))]
         AudioCommand::SetStreamPan { id, pan } => {
-            let index = id as usize;
-            if let Some(Some(stream)) = streaming_sounds.get_mut(index) {
+            if let Some(stream) = streaming_sounds.get_mut(id) {
                 stream.pan = pan.clamp(-1.0, 1.0);
             }
         }
@@ -334,11 +306,11 @@ pub(crate) fn handle_command(
 
 /// Mix all active sounds into the output buffer (called from audio thread)
 ///
-/// This function is ALLOCATION-FREE - all buffers are pre-allocated and reused.
+/// Buffers are reused; larger device blocks or higher concurrency can grow them.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn mix_sounds(
     output: &mut [f32],
-    active_sounds: &mut [Option<ActiveSound>],
+    active_sounds: &mut SoundPool<ActiveSound>,
     temp_buffer: &mut Vec<f32>,
     finished_sounds: &mut Vec<SoundId>,
     listener: &ListenerConfig,
@@ -360,17 +332,17 @@ pub(crate) fn mix_sounds(
     }
 
     // Mix each active sound using block processing (cache-friendly sequential iteration)
-    for (idx, sound_opt) in active_sounds.iter_mut().enumerate() {
-        let sound = match sound_opt {
-            Some(s) => s,
-            None => continue, // Skip empty slots
-        };
-
+    for (id, sound) in active_sounds.iter_mut() {
         if sound.paused {
             continue;
         }
 
-        let duration = sound.mixer.total_duration();
+        if sound.update_fade() {
+            finished_sounds.push(*id);
+            continue;
+        }
+
+        let duration = sound.duration;
 
         // Check if sound will finish during this block
         let time_delta = 1.0 / sample_rate;
@@ -380,14 +352,14 @@ pub(crate) fn mix_sounds(
                 sound.elapsed_time = 0.0;
                 sound.sample_clock = 0.0;
             } else {
-                finished_sounds.push(idx as u64);
+                finished_sounds.push(*id);
                 continue;
             }
         }
 
         // Apply pan tween if active
         if let Some(tween_start) = sound.pan_tween_start_time {
-            let tween_elapsed = sound.elapsed_time - tween_start;
+            let tween_elapsed = (sound.control_time - tween_start) as f32;
             if tween_elapsed >= sound.pan_tween_duration {
                 // Tween complete
                 sound.pan = sound.pan_tween_target_value;
@@ -402,7 +374,7 @@ pub(crate) fn mix_sounds(
 
         // Apply playback rate tween if active
         if let Some(tween_start) = sound.rate_tween_start_time {
-            let tween_elapsed = sound.elapsed_time - tween_start;
+            let tween_elapsed = (sound.control_time - tween_start) as f32;
             if tween_elapsed >= sound.rate_tween_duration {
                 // Tween complete
                 sound.playback_rate = sound.rate_tween_target_value;
@@ -488,17 +460,16 @@ pub(crate) fn mix_sounds(
             params_for_mixer,
         );
 
+        let pan_angle = (spatial_pan + 1.0) * 0.25 * std::f32::consts::PI;
+        let left_pan = pan_angle.cos();
+        let right_pan = pan_angle.sin();
+
         // Mix temp buffer into output with volume/pan/fade applied.
         // SIMD fast path requires rate == 1.0 (no resampling) and no active fade.
         if sound.fade_start_time.is_none() && channels == 2 && !needs_resample {
             // SIMD fast path: no fade, stereo output, playback_rate == 1.0
             let combined_volume = sound.volume * spatial_volume;
             let simd_num_frames = source_frames; // == num_frames when !needs_resample
-
-            // Calculate pan multipliers once (constant-power, matches process_block.rs)
-            let pan_angle = (spatial_pan + 1.0) * 0.25 * std::f32::consts::PI;
-            let left_pan = pan_angle.cos();
-            let right_pan = pan_angle.sin();
 
             match SIMD.simd_width() {
                 SimdWidth::X8 => {
@@ -557,7 +528,11 @@ pub(crate) fn mix_sounds(
                         output_right = mixed_right.to_array();
 
                         // Interleave and store using SIMD (dispatches to AVX2/SSE/scalar)
-                        SIMD.interleave_stereo(&output_left, &output_right, &mut output[out_start..]);
+                        SIMD.interleave_stereo(
+                            &output_left,
+                            &output_right,
+                            &mut output[out_start..],
+                        );
                     }
 
                     // Handle remainder frames with scalar code
@@ -620,35 +595,8 @@ pub(crate) fn mix_sounds(
                     (temp_buffer[idx], temp_buffer[idx + 1])
                 };
 
-                let frame_time =
-                    sound.elapsed_time + (frame_idx as f32 * time_delta * effective_playback_rate);
-
-                // Apply fade if active
-                let effective_volume = if let Some(fade_start) = sound.fade_start_time {
-                    let fade_elapsed = frame_time - fade_start;
-                    if fade_elapsed >= sound.fade_duration {
-                        // Fade complete
-                        if frame_idx == 0 {
-                            sound.volume = sound.fade_target_volume;
-                            sound.fade_start_time = None;
-                        }
-                        sound.fade_target_volume
-                    } else {
-                        // Interpolate
-                        let t = (fade_elapsed / sound.fade_duration).clamp(0.0, 1.0);
-                        sound.fade_start_volume
-                            + (sound.fade_target_volume - sound.fade_start_volume) * t
-                    }
-                } else {
-                    sound.volume
-                };
-
-                // Apply pan using constant-power panning (matches SIMD fast path formula)
-                // Linear panning here would cause a ~3dB amplitude jump when transitioning
-                // from the SIMD fast path (e.g. at fade start), producing an audible click.
-                let pan_angle = (spatial_pan + 1.0) * 0.25 * std::f32::consts::PI;
-                let left_pan = pan_angle.cos();
-                let right_pan = pan_angle.sin();
+                let effective_volume =
+                    sound.volume_at(sound.control_time + frame_idx as f64 / sample_rate as f64);
 
                 let out_left = left * effective_volume * spatial_volume * left_pan;
                 let out_right = right * effective_volume * spatial_volume * right_pan;
@@ -666,22 +614,21 @@ pub(crate) fn mix_sounds(
             }
         }
 
+        sound.control_time += num_frames as f64 / sample_rate as f64;
+        if sound.update_fade() {
+            finished_sounds.push(*id);
+        }
+
         // Advance elapsed time by the amount of source material consumed this block
         sound.elapsed_time += base_block_duration * effective_playback_rate;
         sound.sample_clock =
             (sound.sample_clock + (num_frames as f32 * effective_playback_rate)) % sample_rate;
     }
 
-    // Remove finished sounds (set slots to None)
+    // Remove finished sounds from the dense pool.
     for id in finished_sounds {
-        let index = *id as usize;
-        if index < active_sounds.len() {
-            active_sounds[index] = None;
-        }
+        active_sounds.remove(*id);
     }
-
-    // Clamp output to prevent distortion (SIMD accelerated)
-    SIMD.clamp_buffer(output, -1.0, 1.0);
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -691,7 +638,7 @@ pub(crate) fn mix_sounds(
 /// This is ALLOCATION-FREE and lock-free (uses lockless ring buffer).
 pub(crate) fn mix_streaming_sounds(
     output: &mut [f32],
-    streaming_sounds: &mut [Option<StreamingSound>],
+    streaming_sounds: &mut SoundPool<StreamingSound>,
     finished_streams: &mut Vec<SoundId>,
     channels: usize,
 ) {
@@ -701,17 +648,12 @@ pub(crate) fn mix_streaming_sounds(
     finished_streams.clear();
 
     // Mix each streaming sound (cache-friendly sequential iteration)
-    for (idx, stream_opt) in streaming_sounds.iter_mut().enumerate() {
-        let stream = match stream_opt {
-            Some(s) => s,
-            None => continue, // Skip empty slots
-        };
-
+    for (id, stream) in streaming_sounds.iter_mut() {
         // Check if the decoder thread has finished
         if let Some(handle) = &stream.decoder_thread {
             if handle.is_finished() {
                 // Thread finished - mark for removal
-                finished_streams.push(idx as u64);
+                finished_streams.push(*id);
                 continue;
             }
         }
@@ -752,11 +694,8 @@ pub(crate) fn mix_streaming_sounds(
         }
     }
 
-    // Remove finished streams (set slots to None)
+    // Remove finished streams from the dense pool.
     for id in finished_streams.iter() {
-        let index = *id as usize;
-        if index < streaming_sounds.len() {
-            streaming_sounds[index] = None;
-        }
+        streaming_sounds.remove(*id);
     }
 }

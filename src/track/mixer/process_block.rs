@@ -5,6 +5,7 @@
 use super::Mixer;
 use crate::synthesis::effects::ResolvedSidechainSource;
 use crate::synthesis::simd::{SimdLanes, SIMD};
+#[cfg(not(target_arch = "wasm32"))]
 use crate::track::ids::{BusId, TrackId};
 
 // Use rayon for parallel processing on native platforms
@@ -12,6 +13,22 @@ use crate::track::ids::{BusId, TrackId};
 use rayon::prelude::*;
 
 impl Mixer {
+    pub(crate) fn prepare_realtime(&mut self, frames: usize) {
+        self.realtime = true;
+        self.master.prepare_stereo_buffer(frames);
+        for bus in self.buses.iter_mut().flatten() {
+            bus.scratch_buffer.resize(frames * 2, 0.0);
+            bus.effects.prepare_stereo_buffer(frames);
+            for track in &mut bus.tracks {
+                track.ensure_sorted();
+                track.start_time();
+                track.end_time();
+                track.scratch_buffer.resize(frames, 0.0);
+                track.sample_scratch_buffer.resize(frames, 0.0);
+            }
+        }
+    }
+
     /// Process a block of samples
     ///
     /// This is the new block-based processing API that processes multiple samples at once,
@@ -36,6 +53,9 @@ impl Mixer {
         buffer.fill(0.0);
 
         let num_frames = buffer.len() / 2;
+        if num_frames == 0 {
+            return;
+        }
         let start_sample_count = self.sample_count;
         self.sample_count = self.sample_count.wrapping_add(num_frames as u64);
 
@@ -48,6 +68,7 @@ impl Mixer {
 
         // PASS 1: Render bus audio and calculate envelopes in PARALLEL
         // BusRenderResult carries only metadata — audio data lives in bus.scratch_buffer
+        #[cfg(not(target_arch = "wasm32"))]
         struct BusRenderResult {
             bus_id: BusId,
             bus_envelope: f32,
@@ -56,98 +77,114 @@ impl Mixer {
 
         // Parallel bus processing on native, sequential on web
         #[cfg(not(target_arch = "wasm32"))]
-        let bus_results: Vec<BusRenderResult> = self
-            .buses
-            .par_iter_mut()
-            .filter_map(|bus_opt| {
-                let bus = bus_opt.as_mut()?;
-                if bus.muted {
-                    return None;
-                }
+        if !self.realtime {
+            let bus_results: Vec<BusRenderResult> = self
+                .buses
+                .par_iter_mut()
+                .filter_map(|bus_opt| {
+                    let bus = bus_opt.as_mut()?;
+                    if bus.muted {
+                        return None;
+                    }
 
-                let bus_id = bus.id;
+                    let bus_id = bus.id;
 
-                // Reuse pre-allocated bus scratch buffer (resize only if block size changed)
-                bus.scratch_buffer.resize(buffer.len(), 0.0);
-                bus.scratch_buffer.fill(0.0);
+                    // Reuse pre-allocated bus scratch buffer (resize only if block size changed)
+                    bus.scratch_buffer.resize(buffer.len(), 0.0);
+                    bus.scratch_buffer.fill(0.0);
 
-                // Clone the Arc to share the cache across threads (cheap - just incrementing ref count)
-                let cache_clone = self.cache.clone();
-                #[cfg(feature = "gpu")]
-                let gpu_clone = self.gpu_synthesizer.clone();
-                let prerendered = self.prerendered;
+                    // Clone the Arc to share the cache across threads (cheap - just incrementing ref count)
+                    let cache_clone = self.cache.clone();
+                    #[cfg(feature = "gpu")]
+                    let gpu_clone = self.gpu_synthesizer.clone();
+                    let prerendered = self.prerendered;
 
-                // Process each track in this bus IN PARALLEL using Rayon
-                let track_results: Vec<_> = bus
-                    .tracks
-                    .par_iter_mut()
-                    .map(|track| {
-                        let track_id = track.id;
-                        let pan = track.pan;
+                    // Process each track in this bus IN PARALLEL using Rayon
+                    let track_results: Vec<_> = bus
+                        .tracks
+                        .par_iter_mut()
+                        .map(|track| {
+                            let track_id = track.id;
+                            let pan = track.pan;
 
-                        // Resize scratch buffer to required size
-                        track.scratch_buffer.resize(num_frames, 0.0);
+                            // Resize scratch buffer to required size
+                            track.scratch_buffer.resize(num_frames, 0.0);
 
-                        // std::mem::take splits the borrow: we temporarily own the Vec,
-                        // pass it to process_track_block, then put it back. Zero allocations.
-                        let mut buf = std::mem::take(&mut track.scratch_buffer);
+                            // std::mem::take splits the borrow: we temporarily own the Vec,
+                            // pass it to process_track_block, then put it back. Zero allocations.
+                            let mut buf = std::mem::take(&mut track.scratch_buffer);
 
-                        // Generate mono track audio using block processing
-                        // Cache is thread-safe via Arc<Mutex>, GPU synthesizer via Arc
-                        Mixer::process_track_block(
-                            track,
-                            &mut buf,
-                            sample_rate,
-                            start_time,
-                            start_sample_count,
-                            cache_clone.as_ref(),
-                            #[cfg(feature = "gpu")]
-                            gpu_clone.as_ref(),
-                            prerendered,
+                            // Generate mono track audio using block processing
+                            // Cache is thread-safe via Arc<Mutex>, GPU synthesizer via Arc
+                            Mixer::process_track_block(
+                                track,
+                                &mut buf,
+                                sample_rate,
+                                start_time,
+                                start_sample_count,
+                                cache_clone.as_ref(),
+                                #[cfg(feature = "gpu")]
+                                gpu_clone.as_ref(),
+                                prerendered,
+                                true,
+                            );
+
+                            // Calculate RMS envelope for this track (SIMD-optimized)
+                            let sum_squares = SIMD.sum_of_squares(&buf);
+                            let track_envelope = (sum_squares / num_frames as f32).sqrt();
+
+                            // Return the buffer to the track
+                            track.scratch_buffer = buf;
+
+                            (track_id, track_envelope, pan)
+                        })
+                        .collect();
+
+                    // Mix all track scratch buffers into the bus scratch buffer
+                    let mut track_envelopes = Vec::with_capacity(track_results.len());
+                    for (track, (track_id, track_envelope, pan)) in
+                        bus.tracks.iter().zip(track_results.iter())
+                    {
+                        track_envelopes.push((*track_id, *track_envelope));
+                        let pan_angle = (pan + 1.0) * 0.25 * std::f32::consts::PI;
+                        let left_gain = pan_angle.fast_cos();
+                        let right_gain = pan_angle.fast_sin();
+                        SIMD.mix_mono_to_stereo(
+                            &mut bus.scratch_buffer,
+                            &track.scratch_buffer,
+                            left_gain,
+                            right_gain,
                         );
+                    }
 
-                        // Calculate RMS envelope for this track (SIMD-optimized)
-                        let sum_squares = SIMD.sum_of_squares(&buf);
-                        let track_envelope = (sum_squares / num_frames as f32).sqrt();
+                    // Calculate bus envelope (before effects) - SIMD-optimized
+                    // For stereo, RMS = sqrt((sum(L²) + sum(R²)) / (2 * num_frames))
+                    let total_sum_squares = SIMD.sum_of_squares(&bus.scratch_buffer);
+                    let bus_envelope = (total_sum_squares / (2.0 * num_frames as f32)).sqrt();
 
-                        // Return the buffer to the track
-                        track.scratch_buffer = buf;
-
-                        (track_id, track_envelope, pan)
+                    Some(BusRenderResult {
+                        bus_id,
+                        bus_envelope,
+                        track_envelopes,
                     })
-                    .collect();
-
-                // Mix all track scratch buffers into the bus scratch buffer
-                let mut track_envelopes = Vec::with_capacity(track_results.len());
-                for (track, (track_id, track_envelope, pan)) in bus.tracks.iter().zip(track_results.iter()) {
-                    track_envelopes.push((*track_id, *track_envelope));
-                    let pan_angle = (pan + 1.0) * 0.25 * std::f32::consts::PI;
-                    let left_gain = pan_angle.fast_cos();
-                    let right_gain = pan_angle.fast_sin();
-                    SIMD.mix_mono_to_stereo(&mut bus.scratch_buffer, &track.scratch_buffer, left_gain, right_gain);
-                }
-
-                // Calculate bus envelope (before effects) - SIMD-optimized
-                // For stereo, RMS = sqrt((sum(L²) + sum(R²)) / (2 * num_frames))
-                let total_sum_squares = SIMD.sum_of_squares(&bus.scratch_buffer);
-                let bus_envelope = (total_sum_squares / (2.0 * num_frames as f32)).sqrt();
-
-                Some(BusRenderResult {
-                    bus_id,
-                    bus_envelope,
-                    track_envelopes,
                 })
-            })
-            .collect();
+                .collect();
 
-        #[cfg(target_arch = "wasm32")]
-        let bus_results: Vec<BusRenderResult> = self
-            .buses
-            .iter_mut()
-            .filter_map(|bus_opt| {
-                let bus = bus_opt.as_mut()?;
+            // Cache all track and bus envelopes (now safe since all are computed)
+            for result in &bus_results {
+                for (track_id, envelope) in &result.track_envelopes {
+                    self.envelope_cache.cache_track(*track_id, *envelope);
+                }
+                self.envelope_cache
+                    .cache_bus(result.bus_id, result.bus_envelope);
+            }
+        }
+
+        let sequential = cfg!(target_arch = "wasm32") || self.realtime;
+        if sequential {
+            for bus in self.buses.iter_mut().flatten() {
                 if bus.muted {
-                    return None;
+                    continue;
                 }
 
                 let bus_id = bus.id;
@@ -163,7 +200,6 @@ impl Mixer {
                 let prerendered = self.prerendered;
 
                 // Process each track in this bus SEQUENTIALLY on web
-                let mut track_envelopes = Vec::with_capacity(bus.tracks.len());
                 for track in bus.tracks.iter_mut() {
                     let track_id = track.id;
                     let pan = track.pan;
@@ -186,12 +222,13 @@ impl Mixer {
                         #[cfg(feature = "gpu")]
                         gpu_clone.as_ref(),
                         prerendered,
+                        !self.realtime,
                     );
 
                     // Calculate RMS envelope for this track (SIMD-optimized)
                     let sum_squares = SIMD.sum_of_squares(&buf);
                     let track_envelope = (sum_squares / num_frames as f32).sqrt();
-                    track_envelopes.push((track_id, track_envelope));
+                    self.envelope_cache.cache_track(track_id, track_envelope);
 
                     // Mix into bus buffer and return buffer to track
                     let pan_angle = (pan + 1.0) * 0.25 * std::f32::consts::PI;
@@ -207,32 +244,16 @@ impl Mixer {
                 let total_sum_squares = SIMD.sum_of_squares(&bus.scratch_buffer);
                 let bus_envelope = (total_sum_squares / (2.0 * num_frames as f32)).sqrt();
 
-                Some(BusRenderResult {
-                    bus_id,
-                    bus_envelope,
-                    track_envelopes,
-                })
-            })
-            .collect();
-
-        // Cache all track and bus envelopes (now safe since all are computed)
-        for result in &bus_results {
-            for (track_id, envelope) in &result.track_envelopes {
-                self.envelope_cache.cache_track(*track_id, *envelope);
+                self.envelope_cache.cache_bus(bus_id, bus_envelope);
             }
-            self.envelope_cache
-                .cache_bus(result.bus_id, result.bus_envelope);
         }
 
         // PASS 2: Apply effects and mix to output (sequential — effects have state)
         // Audio data lives in bus.scratch_buffer; result carries only metadata.
-        for result in bus_results {
-            // Find the original bus to apply effects and read its scratch buffer
-            let bus = self
-                .buses
-                .iter_mut()
-                .find_map(|b| b.as_mut().filter(|bus| bus.id == result.bus_id))
-                .expect("Bus should exist");
+        for bus in self.buses.iter_mut().flatten() {
+            if bus.muted {
+                continue;
+            }
 
             // Look up sidechain envelope (now safe - all envelopes cached in pass 1)
             let sidechain_env = if let Some(ref compressor) = bus.effects.compressor {
@@ -295,5 +316,41 @@ impl Mixer {
             start_sample_count,
             master_sidechain_env,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::composition::{Composition, Tempo};
+    use crate::synthesis::Sample;
+
+    #[test]
+    fn realtime_render_matches_offline_with_overlapping_notes_and_effects() {
+        let mut comp = Composition::new(Tempo::new(120.0));
+        comp.track("bass").note(&[110.0], 2.0);
+        comp.track("lead").note(&[440.0], 0.5).note(&[660.0], 0.5);
+        let mut offline = comp.into_mixer();
+        offline.master_limiter(crate::synthesis::effects::Limiter::mastering());
+        let mut realtime = offline.clone();
+        realtime.prepare_realtime(128);
+        let mut expected = [0.0; 256];
+        let mut actual = [0.0; 256];
+        for block in 0..40 {
+            let time = block as f32 * 128.0 / 4096.0;
+            offline.process_block(&mut expected, 4096.0, time, None, None);
+            realtime.process_block(&mut actual, 4096.0, time, None, None);
+            for (a, b) in actual.iter().zip(expected) {
+                assert!((a - b).abs() < 1e-6);
+            }
+        }
+    }
+
+    #[test]
+    fn sample_onset_inside_block_matches_individual_samples() {
+        let sample = Sample::from_mono(vec![0.5; 1024], 1024);
+        let mut buffer = [0.0; 256];
+        sample.fill_buffer_simd_mono(&mut buffer, 0.125, 0.0, 1.0 / 1024.0, 1.0, 1.0);
+        assert!(buffer[..128].iter().all(|&s| s == 0.0));
+        assert!(buffer[128..].iter().all(|&s| (s - 0.5).abs() < 1e-6));
     }
 }

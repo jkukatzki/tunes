@@ -91,6 +91,7 @@ pub struct EffectChain {
     //             33=SpectralResonator, 34=SpectralPanner
     // (AutoPan excluded - handled separately in stereo stage)
     pub(crate) effect_order: Vec<u8>,
+    stereo_scratch: [Vec<f32>; 2],
 }
 
 impl std::fmt::Debug for EffectChain {
@@ -142,6 +143,13 @@ impl EffectChain {
             spectral_resonator: None,
             spectral_panner: None,
             effect_order: Vec::new(),
+            stereo_scratch: [Vec::new(), Vec::new()],
+        }
+    }
+
+    pub(crate) fn prepare_stereo_buffer(&mut self, frames: usize) {
+        if !self.effect_order.iter().all(|id| matches!(id, 1 | 13)) {
+            for buffer in &mut self.stereo_scratch { buffer.resize(frames, 0.0); }
         }
     }
 
@@ -843,17 +851,25 @@ impl EffectChain {
         sample_count: u64,
         sidechain_envelope: Option<f32>,
     ) {
-        // OPTIMIZATION: Process each effect on the full buffer instead of
-        // processing each sample through all effects. This allows effects
-        // to calculate constants once and improves cache locality.
-
+        // Empty chains and channel-linked dynamics can work directly on the
+        // interleaved buffer. This is the common per-note mixer path.
+        if self.effect_order.iter().all(|id| matches!(id, 1 | 13)) {
+            for &id in &self.effect_order {
+                match id {
+                    1 => if let Some(compressor) = &mut self.compressor {
+                        compressor.process_stereo_block(buffer, sample_rate, time, sample_count, sidechain_envelope);
+                    },
+                    13 => if let Some(limiter) = &mut self.limiter {
+                        limiter.process_stereo_block(buffer, sample_rate, time, sample_count);
+                    },
+                    _ => unreachable!(),
+                }
+            }
+            return;
+        }
         let num_frames = buffer.len() / 2;
-
-        // Allocate temporary buffers for deinterleaved L/R channels
-        // Note: Modern allocators are fast enough that caching these buffers
-        // actually hurts performance due to resize/clear overhead
-        let mut left_buffer = vec![0.0f32; num_frames];
-        let mut right_buffer = vec![0.0f32; num_frames];
+        self.prepare_stereo_buffer(num_frames);
+        let [left_buffer, right_buffer] = &mut self.stereo_scratch;
 
         // Deinterleave stereo buffer into separate L/R channels
         for (i, frame) in buffer.chunks_exact(2).enumerate() {
@@ -895,43 +911,43 @@ impl EffectChain {
                 6 => {
                     // Chorus: use optimized process_block
                     if let Some(ref mut chorus) = self.chorus {
-                        chorus.process_block(&mut left_buffer, sample_rate, time, sample_count);
-                        chorus.process_block(&mut right_buffer, sample_rate, time, sample_count);
+                        chorus.process_block(left_buffer, sample_rate, time, sample_count);
+                        chorus.process_block(right_buffer, sample_rate, time, sample_count);
                     }
                 }
                 7 => {
                     // Phaser: use optimized process_block
                     if let Some(ref mut phaser) = self.phaser {
-                        phaser.process_block(&mut left_buffer, sample_rate, time, sample_count);
-                        phaser.process_block(&mut right_buffer, sample_rate, time, sample_count);
+                        phaser.process_block(left_buffer, sample_rate, time, sample_count);
+                        phaser.process_block(right_buffer, sample_rate, time, sample_count);
                     }
                 }
                 8 => {
                     // Flanger: use optimized process_block
                     if let Some(ref mut flanger) = self.flanger {
-                        flanger.process_block(&mut left_buffer, sample_rate, time, sample_count);
-                        flanger.process_block(&mut right_buffer, sample_rate, time, sample_count);
+                        flanger.process_block(left_buffer, sample_rate, time, sample_count);
+                        flanger.process_block(right_buffer, sample_rate, time, sample_count);
                     }
                 }
                 11 => {
                     // Delay: use optimized process_block
                     if let Some(ref mut delay) = self.delay {
-                        delay.process_block(&mut left_buffer, time, sample_count, sample_rate);
-                        delay.process_block(&mut right_buffer, time, sample_count, sample_rate);
+                        delay.process_block(left_buffer, time, sample_count, sample_rate);
+                        delay.process_block(right_buffer, time, sample_count, sample_rate);
                     }
                 }
                 12 => {
                     // Reverb: use optimized process_block
                     if let Some(ref mut reverb) = self.reverb {
-                        reverb.process_block(&mut left_buffer, time, sample_count, sample_rate);
-                        reverb.process_block(&mut right_buffer, time, sample_count, sample_rate);
+                        reverb.process_block(left_buffer, time, sample_count, sample_rate);
+                        reverb.process_block(right_buffer, time, sample_count, sample_rate);
                     }
                 }
                 2 => {
                     // Gate: use optimized process_block
                     if let Some(ref mut gate) = self.gate {
-                        gate.process_block(&mut left_buffer, sample_rate, time, sample_count);
-                        gate.process_block(&mut right_buffer, sample_rate, time, sample_count);
+                        gate.process_block(left_buffer, sample_rate, time, sample_count);
+                        gate.process_block(right_buffer, sample_rate, time, sample_count);
                     }
                 }
                 _ => {

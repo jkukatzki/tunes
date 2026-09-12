@@ -47,9 +47,12 @@ pub struct Track {
 
     // Flag to track if events are sorted by start_time
     pub(super) events_sorted: bool,
+    event_end_prefix: Vec<f32>,
 
     /// Pre-allocated scratch buffer for block audio processing (reused each callback)
     pub(crate) scratch_buffer: Vec<f32>,
+    pub(crate) sample_scratch_buffer: Vec<f32>,
+    pub(crate) drum_starts: std::collections::HashMap<DrumType, f32>,
 }
 
 impl Track {
@@ -76,7 +79,10 @@ impl Track {
             cached_start_time: None,
             cached_end_time: None,
             events_sorted: true, // Empty list is sorted
+            event_end_prefix: Vec::new(),
             scratch_buffer: Vec::new(),
+            sample_scratch_buffer: Vec::new(),
+            drum_starts: std::collections::HashMap::new(),
         }
     }
 
@@ -116,7 +122,7 @@ impl Track {
             return cached;
         }
 
-        let end = self.total_duration();
+        let end = self.playback_duration();
         self.cached_end_time = Some(end);
         end
     }
@@ -142,33 +148,27 @@ impl Track {
                     .partial_cmp(&b.start_time())
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
+            self.event_end_prefix.clear();
+            let mut latest_end = f32::NEG_INFINITY;
+            for event in &self.events {
+                latest_end = latest_end.max(event.end_time());
+                self.event_end_prefix.push(latest_end);
+            }
             self.events_sorted = true;
         }
     }
 
-    /// Find the range of events that could be active at the given time using binary search
-    /// Returns (start_index, end_index) where events[start_index..end_index] may be active
-    ///
-    /// This is O(log n) instead of O(n), dramatically faster for large event counts
+    /// Find candidates active at a single sample time.
     pub(super) fn find_active_range(&self, time: f32) -> (usize, usize) {
-        if self.events.is_empty() {
-            return (0, 0);
-        }
+        self.find_active_range_until(time, time)
+    }
 
-        // Binary search to find first event that MIGHT be active
-        // An event is potentially active if: time >= (event.start_time - max_release_time)
-        // For simplicity, we search for events that start before or at current time + lookahead
-
-        // Find first event that ends after current time
-        let start_idx = self
-            .events
-            .partition_point(|event| event.end_time() <= time);
-
-        // All remaining events could potentially be active (they end after current time)
-        // We could further optimize by finding events that start after current time,
-        // but for now this gives us O(log n) search + O(k) iteration where k = active events
-
-        (start_idx, self.events.len())
+    /// Starts are sorted, but ends are not: a long note may contain many short
+    /// notes. Search monotonically increasing prefix maxima to retain it.
+    pub(super) fn find_active_range_until(&self, start: f32, end: f32) -> (usize, usize) {
+        let end_idx = self.events.partition_point(|event| event.start_time() <= end);
+        let start_idx = self.event_end_prefix.partition_point(|&latest| latest <= start);
+        (start_idx.min(end_idx), end_idx)
     }
 
     /// Set track volume (builder pattern)
@@ -421,27 +421,53 @@ impl Track {
         }
     }
 
-    /// Get the total duration of the track in seconds
-    ///
-    /// Returns the end time of the last event (including release times for notes).
-    /// Returns 0.0 for empty tracks.
+    /// Scheduled track length, excluding note release tails (used for repeats).
     pub fn total_duration(&self) -> f32 {
-        self.events
-            .iter()
-            .map(|e| match e {
-                AudioEvent::Note(n) => n.start_time + n.duration,
-                AudioEvent::Drum(d) => d.start_time + d.drum_type.duration(),
-                AudioEvent::Sample(s) => s.start_time + (s.sample.duration / s.playback_rate),
-                AudioEvent::TempoChange(t) => t.start_time,
-                AudioEvent::TimeSignature(ts) => ts.start_time,
-                AudioEvent::KeySignature(ks) => ks.start_time,
-            })
-            .fold(0.0, f32::max)
+        self.events.iter().map(|event| match event {
+            AudioEvent::Note(note) => note.start_time + note.duration,
+            _ => event.end_time(),
+        }).fold(0.0, f32::max)
     }
+
+    /// Audible event duration, including the last note's envelope release.
+    /// Effect tails beyond the final event are not included.
+    pub fn playback_duration(&self) -> f32 {
+        self.events.iter().map(AudioEvent::end_time).fold(0.0, f32::max)
+    }
+
 }
 
 impl Default for Track {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod block_range_tests {
+    use super::*;
+
+    #[test]
+    fn nested_short_notes_do_not_hide_a_held_note() {
+        let mut track = Track::new();
+        track.add_note(&[220.0], 0.0, 10.0);
+        track.add_note(&[440.0], 0.5, 0.1);
+        track.add_note(&[880.0], 1.0, 0.1);
+        track.add_note(&[1760.0], 20.0, 0.1);
+        track.ensure_sorted();
+        let (start, end) = track.find_active_range_until(2.0, 2.1);
+        assert_eq!(start, 0);
+        assert_eq!(end, 3); // Do not scan the future note in each sample loop.
+        assert_eq!(track.find_active_range_until(15.0, 15.1), (3, 3));
+    }
+
+    #[test]
+    fn playback_duration_includes_release_without_changing_repeat_length() {
+        let mut track = Track::new();
+        track.add_note_with_waveform_and_envelope(
+            &[440.0], 0.0, 1.0, Waveform::Sine, Envelope::new(0.01, 0.1, 0.7, 0.5),
+        );
+        assert_eq!(track.total_duration(), 1.0);
+        assert_eq!(track.playback_duration(), 1.5);
     }
 }

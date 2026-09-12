@@ -61,6 +61,7 @@ pub struct Mixer {
 
     // Track if we've pre-rendered notes (skip cache checks during streaming)
     pub(crate) prerendered: bool,
+    pub(crate) realtime: bool,
 
     pub tempo: Tempo,
     pub(super) sample_count: u64, // For quantized automation lookups
@@ -90,6 +91,7 @@ impl Mixer {
             #[cfg(feature = "gpu")]
             gpu_synthesizer: None, // GPU disabled by default (requires explicit enable_gpu call)
             prerendered: false,
+            realtime: false,
             tempo,
             sample_count: 0,
             master: EffectChain::new(),
@@ -316,6 +318,13 @@ impl Mixer {
             .filter_map(|opt| opt.as_ref())
             .map(|b| b.total_duration())
             .fold(0.0, f32::max)
+    }
+
+    /// Audible event duration, including final note releases, for rendering.
+    /// Effect tails beyond the final event are not included.
+    pub fn playback_duration(&self) -> f32 {
+        self.buses.iter().flatten().flat_map(|bus| &bus.tracks)
+            .map(Track::playback_duration).fold(0.0, f32::max)
     }
 
     /// Check if the mixer has any audio events

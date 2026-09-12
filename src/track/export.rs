@@ -46,7 +46,7 @@ impl Mixer {
 
         let mut writer = hound::WavWriter::create(path, spec)?;
 
-        let duration = self.total_duration();
+        let duration = self.playback_duration();
         let total_samples = (duration * sample_rate as f32).ceil() as usize;
 
         println!("Rendering to WAV...");
@@ -141,7 +141,7 @@ impl Mixer {
         use flacenc::error::Verify;
         use flacenc::source::MemSource;
 
-        let duration = self.total_duration();
+        let duration = self.playback_duration();
         let total_samples = (duration * sample_rate as f32).ceil() as usize;
 
         println!("Rendering to FLAC...");
@@ -350,7 +350,7 @@ impl Mixer {
 
         // Determine duration for this track
         let all_tracks = self.all_tracks();
-        let duration = all_tracks[track_index].total_duration();
+        let duration = all_tracks[track_index].playback_duration();
         let total_samples = (duration * sample_rate as f32).ceil() as usize;
         let sample_rate_f32 = sample_rate as f32;
         let mut sample_clock = 0.0;

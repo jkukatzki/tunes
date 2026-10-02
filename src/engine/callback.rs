@@ -28,6 +28,7 @@ use wide::f32x8;
 pub(crate) struct AudioCallbackState {
     /// Active sounds packed together, independent of monotonically increasing SoundIds
     pub active_sounds: SoundPool<ActiveSound>,
+    pub effect_buses: SoundPool<super::effect_bus::EffectBusState>,
     /// Streaming sounds (separate from pre-rendered sounds, native only)
     #[cfg(not(target_arch = "wasm32"))]
     pub streaming_sounds: SoundPool<StreamingSound>,
@@ -46,6 +47,7 @@ impl AudioCallbackState {
         Self {
             // Pre-allocate space for 128 concurrent sounds (typical max for games)
             active_sounds: SoundPool::with_capacity(128),
+            effect_buses: SoundPool::with_capacity(8),
             #[cfg(not(target_arch = "wasm32"))]
             streaming_sounds: SoundPool::with_capacity(16),
             // Pre-allocate for a reasonably large buffer (2048 frames stereo = 4096 samples)
@@ -68,6 +70,7 @@ impl AudioCallbackState {
 /// Handle commands from the main thread (called from audio thread)
 pub(crate) fn handle_command(
     cmd: AudioCommand,
+    effect_buses: &mut SoundPool<super::effect_bus::EffectBusState>,
     active_sounds: &mut SoundPool<ActiveSound>,
     #[cfg(not(target_arch = "wasm32"))] streaming_sounds: &mut SoundPool<StreamingSound>,
     listener_atomic: &Arc<Atomic<ListenerConfig>>,
@@ -76,8 +79,29 @@ pub(crate) fn handle_command(
     playing_states: &DashMap<SoundId, ()>,
 ) {
     match cmd {
+        AudioCommand::PlaySource { id, source, bus } => {
+            if let Some(route) = bus.and_then(|id| effect_buses.get_mut(id)) {
+                route.paused = false;
+            }
+            active_sounds.insert(id, ActiveSound::from_source(*source, false, bus));
+        }
+        AudioCommand::SetEffectBus { id, bus } => {
+            effect_buses.insert(id, *bus);
+        }
+        AudioCommand::RemoveEffectBus { id } => {
+            effect_buses.remove(id);
+        }
+        AudioCommand::SetEffectBusMix { id, delay, reverb } => {
+            if let Some(bus) = effect_buses.get_mut(id) {
+                bus.set_mix(delay, reverb);
+            }
+        }
+
         AudioCommand::Play { id, mixer, looping } => {
-            active_sounds.insert(id, ActiveSound::new(*mixer, looping));
+            active_sounds.insert(
+                id,
+                ActiveSound::from_source(super::source::SoundSource::Mixer(mixer), looping, None),
+            );
         }
         AudioCommand::Stop { id } => {
             active_sounds.remove(id);
@@ -180,16 +204,25 @@ pub(crate) fn handle_command(
             }
         }
         AudioCommand::PauseAll => {
+            for (_, bus) in effect_buses.iter_mut() {
+                bus.paused = true;
+            }
             for (_, sound) in active_sounds.iter_mut() {
                 sound.paused = true;
             }
         }
         AudioCommand::ResumeAll => {
+            for (_, bus) in effect_buses.iter_mut() {
+                bus.paused = false;
+            }
             for (_, sound) in active_sounds.iter_mut() {
                 sound.paused = false;
             }
         }
         AudioCommand::StopAll => {
+            for (_, bus) in effect_buses.iter_mut() {
+                bus.reset();
+            }
             active_sounds.clear();
             playing_states.clear();
         }
@@ -313,6 +346,7 @@ pub(crate) fn handle_command(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn mix_sounds(
     output: &mut [f32],
+    effect_buses: &mut SoundPool<super::effect_bus::EffectBusState>,
     active_sounds: &mut SoundPool<ActiveSound>,
     temp_buffer: &mut Vec<f32>,
     finished_sounds: &mut Vec<SoundId>,
@@ -323,6 +357,10 @@ pub(crate) fn mix_sounds(
 ) {
     // Clear output buffer
     output.fill(0.0);
+    for (_, bus) in effect_buses.iter_mut() {
+        bus.input.resize(output.len(), 0.0);
+        bus.input.fill(0.0);
+    }
 
     // Clear finished sounds list (reuse allocation)
     finished_sounds.clear();
@@ -455,7 +493,7 @@ pub(crate) fn mix_sounds(
         };
 
         // Render source_frames of source material into temp_buffer
-        sound.mixer.process_block(
+        sound.source.process_block(
             &mut temp_buffer[..source_size],
             sample_rate,
             sound.elapsed_time,
@@ -466,6 +504,11 @@ pub(crate) fn mix_sounds(
         let pan_angle = (spatial_pan + 1.0) * 0.25 * std::f32::consts::PI;
         let left_pan = pan_angle.cos();
         let right_pan = pan_angle.sin();
+
+        let output = match sound.bus.and_then(|id| effect_buses.get_mut(id)) {
+            Some(bus) => bus.input.as_mut_slice(),
+            None => &mut *output,
+        };
 
         // Mix temp buffer into output with volume/pan/fade applied.
         // SIMD fast path requires rate == 1.0 (no resampling) and no active fade.
@@ -626,6 +669,10 @@ pub(crate) fn mix_sounds(
         sound.elapsed_time += base_block_duration * effective_playback_rate;
         sound.sample_clock =
             (sound.sample_clock + (num_frames as f32 * effective_playback_rate)) % sample_rate;
+    }
+
+    for (_, bus) in effect_buses.iter_mut() {
+        bus.process_add(output, channels, sample_rate);
     }
 
     // Remove finished sounds from the dense pool.

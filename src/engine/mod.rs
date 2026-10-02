@@ -19,21 +19,24 @@
 //! - `sample_builder` - Builder for one-shot sample playback
 
 mod active_sound;
+mod effect_bus;
+mod source;
+pub use effect_bus::{BusEffects, EffectBus};
 mod callback;
 mod commands;
+mod output_limiter;
 mod sample_builder;
 mod sound_pool;
-mod output_limiter;
+#[cfg(not(target_arch = "wasm32"))]
+mod streaming;
+#[cfg(test)]
+mod tests;
 #[cfg(all(target_arch = "wasm32", feature = "web"))]
 mod web_audio;
 #[cfg(all(target_arch = "wasm32", feature = "web"))]
 mod web_audio_diagnostics;
 #[cfg(all(target_arch = "wasm32", feature = "web"))]
 mod web_audio_recovery;
-#[cfg(test)]
-mod tests;
-#[cfg(not(target_arch = "wasm32"))]
-mod streaming;
 
 pub use commands::SoundId;
 pub use sample_builder::SamplePlaybackBuilder;
@@ -47,10 +50,10 @@ use crate::track::Mixer;
 use std::thread;
 use std::time::Duration;
 
-use callback::{handle_command, mix_sounds, AudioCallbackState};
-use commands::AudioCommand;
 #[cfg(not(target_arch = "wasm32"))]
 use callback::mix_streaming_sounds;
+use callback::{handle_command, mix_sounds, AudioCallbackState};
+use commands::AudioCommand;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossbeam::channel::{unbounded, Receiver, Sender};
@@ -121,14 +124,69 @@ impl AudioEngine {
         lifecycle.set_pause_when_hidden(true);
         let cpal::platform::StreamInner::WebAudio(old) = self._stream.as_inner();
         let _ = old.audio_context().close();
-        stream.play().map_err(|error| TunesError::AudioEngineError(format!(
-            "Failed to restart browser audio output: {error}"
-        )))?;
+        stream.play().map_err(|error| {
+            TunesError::AudioEngineError(format!("Failed to restart browser audio output: {error}"))
+        })?;
         // Remove old DOM listeners/watchdog before releasing the old stream.
         self._web_audio = lifecycle;
         self._stream = stream;
-        web_sys::console::info_1(&"[tunes] Recreated foreground audio output; engine state preserved".into());
+        web_sys::console::info_1(
+            &"[tunes] Recreated foreground audio output; engine state preserved".into(),
+        );
         Ok(true)
+    }
+
+    /// Sample rate of the active output stream in Hz.
+    pub fn sample_rate(&self) -> f32 {
+        self.sample_rate
+    }
+
+    /// Create a persistent post-voice effect route. Its handle owns its lifetime.
+    pub fn create_effect_bus(&self, effects: BusEffects) -> Result<EffectBus> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let handle = EffectBus {
+            id,
+            sender: self.command_tx.clone(),
+            frames: self.buffer_size as usize,
+        };
+        handle.set_effects(effects)?;
+        Ok(handle)
+    }
+
+    /// Move a prepared track into a lightweight voice, without a composition,
+    /// mixer clone, default bus or unused sidechain-envelope calculation.
+    pub fn play_track(
+        &self,
+        track: crate::track::Track,
+        bus: Option<&EffectBus>,
+    ) -> Result<SoundId> {
+        if bus.is_some_and(|bus| !bus.belongs_to(self)) {
+            return Err(TunesError::AudioEngineError(
+                "Effect bus belongs to another engine".into(),
+            ));
+        }
+        self.play_source(
+            source::SoundSource::track(track, self.buffer_size as usize),
+            bus.map(|bus| bus.id),
+        )
+    }
+
+    fn play_source(&self, source: source::SoundSource, bus: Option<u64>) -> Result<SoundId> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        self.playing_states.insert(id, ());
+        if self
+            .command_tx
+            .send(AudioCommand::PlaySource {
+                id,
+                source: Box::new(source),
+                bus,
+            })
+            .is_err()
+        {
+            self.playing_states.remove(&id);
+            return Err(TunesError::AudioEngineError("Audio engine stopped".into()));
+        }
+        Ok(id)
     }
 
     /// Create a new audio engine with default output device
@@ -293,6 +351,7 @@ impl AudioEngine {
                         // Destructure state FIRST to get separate mutable references (satisfies borrow checker)
                         let AudioCallbackState {
                             ref mut active_sounds,
+                            ref mut effect_buses,
                             #[cfg(not(target_arch = "wasm32"))]
                             ref mut streaming_sounds,
                             ref mut temp_buffer,
@@ -305,6 +364,7 @@ impl AudioEngine {
                         while let Ok(cmd) = command_rx.try_recv() {
                             handle_command(
                                 cmd,
+                                effect_buses,
                                 active_sounds,
                                 #[cfg(not(target_arch = "wasm32"))]
                                 streaming_sounds,
@@ -318,6 +378,7 @@ impl AudioEngine {
                         // Mix all active sounds into the output buffer (allocation-free)
                         mix_sounds(
                             data,
+                            effect_buses,
                             active_sounds,
                             temp_buffer,
                             finished_sounds,

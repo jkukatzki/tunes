@@ -562,8 +562,17 @@ impl Sample {
     ) -> usize {
         // Empty or single-frame sample: nothing to interpolate, and num_frames - 1
         // would underflow to usize::MAX making the per-element bounds check always false.
-        if self.num_frames <= 1 {
-            return 0;
+        if self.num_frames == 0 { return 0; }
+        if self.num_frames == 1 {
+            let mut written = 0;
+            for out in buffer.iter_mut() {
+                if time_offset >= sample_duration { break; }
+                let (left, right) = self.sample_at_interpolated(time_offset, playback_rate);
+                *out += (left + right) * 0.5 * volume;
+                time_offset += time_delta;
+                written += 1;
+            }
+            return written;
         }
 
         const MAX_LANES: usize = 8;
@@ -631,10 +640,13 @@ impl Sample {
 
                 // Bounds check
                 if frame_idx >= self.num_frames - 1 {
-                    samples1[i] = 0.0;
-                    samples2[i] = 0.0;
-                    samples_r1[i] = 0.0;
-                    samples_r2[i] = 0.0;
+                    // Match scalar playback at the final frame instead of
+                    // introducing silence depending on SIMD chunk alignment.
+                    let (left, right) = self.sample_at_interpolated(sample_time, playback_rate);
+                    samples1[i] = left;
+                    samples2[i] = left;
+                    samples_r1[i] = right;
+                    samples_r2[i] = right;
                     valid_samples += 1;
                     continue;
                 }

@@ -130,16 +130,17 @@ impl Mixer {
         // We need to search at the start of the block
         let (start_idx, end_idx) = track.find_active_range_until(start_time, block_end_time);
 
-        // OPTIMIZED: Lock-free cache operations with DashMap
+        // Look up cached notes once per block; reuse flags during rendering.
         // No mutex overhead - concurrent cache access from Rayon threads!
-        let mut cached_note_indices = std::collections::HashSet::new();
+        track.cached_note_flags.resize(end_idx - start_idx, false);
+        track.cached_note_flags.fill(false);
 
         if let Some(cache_ref) = cache {
             // Special case: if pre-rendered, all notes are cached
             if prerendered {
                 for (idx, event) in track.events[start_idx..end_idx].iter().enumerate() {
                     if let AudioEvent::Note(_) = event {
-                        cached_note_indices.insert(start_idx + idx);
+                        track.cached_note_flags[idx] = true;
                     }
                 }
             }
@@ -177,7 +178,7 @@ impl Mixer {
                     if let Some(cached_sample) = cache_ref.get(&cache_key) {
                         // Add to cached indices (for synthesis loop to skip)
                         if !prerendered {
-                            cached_note_indices.insert(start_idx + idx);
+                            track.cached_note_flags[idx] = true;
                         }
 
                         // Copy cached sample DIRECTLY to output buffer (SIMD-optimized)
@@ -243,8 +244,15 @@ impl Mixer {
 
         // Pre-render sample events with SIMD for better performance
         // This processes whole blocks instead of per-sample, enabling vectorization
-        track.sample_scratch_buffer.resize(buffer.len(), 0.0);
-        track.sample_scratch_buffer.fill(0.0);
+        let has_samples = track.events[start_idx..end_idx]
+            .iter()
+            .any(|event| matches!(event, AudioEvent::Sample(_)));
+        if has_samples {
+            track.sample_scratch_buffer.resize(buffer.len(), 0.0);
+            track.sample_scratch_buffer.fill(0.0);
+        } else {
+            track.sample_scratch_buffer.clear();
+        }
         for event in &track.events[start_idx..end_idx] {
             if let AudioEvent::Sample(sample_event) = event {
                 sample_event.sample.fill_buffer_simd_mono(
@@ -258,212 +266,199 @@ impl Mixer {
             }
         }
 
-        // Reuse drum bookkeeping across blocks; synth-only tracks allocate nothing.
-        let latest_drum_starts = &mut track.drum_starts;
-
-        // For each sample in the block
-        for (i, sample_out) in buffer.iter_mut().enumerate() {
-            let time = start_time + (i as f32 * time_delta);
-            // Start with current buffer value (which may contain cached samples written above)
-            let mut track_value = *sample_out;
-
-            // Voice stealing: find the latest active drum for each type at this time
-            // This prevents overlapping drums of the same type from stacking
-            latest_drum_starts.clear();
-            for event in track.events[start_idx..end_idx].iter() {
-                if let AudioEvent::Drum(drum_event) = event {
-                    let pitch_ratio = 2.0_f32.powf(drum_event.pitch_offset / 12.0);
-                    let drum_duration = drum_event.drum_type.duration() / pitch_ratio;
-                    if time >= drum_event.start_time && time < drum_event.start_time + drum_duration
-                    {
-                        let entry = latest_drum_starts
-                            .entry(drum_event.drum_type)
-                            .or_insert(f32::MIN);
-                        if drum_event.start_time > *entry {
-                            *entry = drum_event.start_time;
-                        }
-                    }
+        // Render notes event-first: bounds, cache status and waveform dispatch are
+        // determined once per event, rather than scanned for every output sample.
+        for (relative_idx, event) in track.events[start_idx..end_idx].iter().enumerate() {
+            if let AudioEvent::Note(note_event) = event {
+                if track.cached_note_flags[relative_idx] {
+                    continue;
                 }
-            }
+                let end =
+                    note_event.start_time + note_event.envelope.total_duration(note_event.duration);
+                let first =
+                    frame_at_or_after(note_event.start_time, start_time, time_delta, buffer.len());
+                let last = frame_at_or_after(end, start_time, time_delta, buffer.len());
+                if first >= last {
+                    continue;
+                }
+                let num_freqs = note_event.num_freqs;
+                let can_vectorize =
+                    note_event.fm_params.mod_index == 0.0 && note_event.custom_wavetable.is_none();
+                for (offset, sample_out) in buffer[first..last].iter_mut().enumerate() {
+                    let time = start_time + (first + offset) as f32 * time_delta;
+                    let time_in_note = time - note_event.start_time;
+                    let envelope_amp = note_event
+                        .envelope
+                        .amplitude_at(time_in_note, note_event.duration);
 
-            // Process events (reuse binary search result for entire block)
-            for (relative_idx, event) in track.events[start_idx..end_idx].iter().enumerate() {
-                let absolute_idx = start_idx + relative_idx;
+                    // SIMD-optimized polyphonic frequency processing
+                    // Process 8 frequencies at once for 3-6x speedup
+                    use crate::synthesis::simd::SIMD;
+                    use wide::{f32x4, f32x8};
 
-                match event {
-                    AudioEvent::Note(note_event) => {
-                        // Check if this note is cached using the pre-built HashSet (O(1) lookup, no mutex!)
-                        // We built cached_note_indices earlier specifically to avoid cache locking in this hot loop
-                        if cached_note_indices.contains(&absolute_idx) {
-                            // Skip - already rendered directly to output buffer above
-                            continue;
+                    // Pre-calculate pitch bend (hoisted out of frequency loop for efficiency)
+                    let bend_multiplier = if note_event.pitch_bend_semitones != 0.0 {
+                        let bend_progress = (time_in_note / note_event.duration).min(1.0);
+                        2.0f32.powf((note_event.pitch_bend_semitones * bend_progress) / 12.0)
+                    } else {
+                        1.0
+                    };
+
+                    // Determine if we can use SIMD path (simple waveforms only)
+
+                    if can_vectorize && SIMD.width() >= 8 && num_freqs >= 8 {
+                        // SIMD path: process 8 frequencies at once
+                        let chunks = num_freqs / 8;
+                        let bend_simd = f32x8::splat(bend_multiplier);
+                        let time_simd = f32x8::splat(time_in_note);
+
+                        for chunk_idx in 0..chunks {
+                            let base_idx = chunk_idx * 8;
+
+                            // Load 8 base frequencies
+                            let mut freq_array = [0.0f32; 8];
+                            freq_array
+                                .copy_from_slice(&note_event.frequencies[base_idx..base_idx + 8]);
+                            let base_freqs = f32x8::from(freq_array);
+
+                            // Apply pitch bend to all 8 frequencies at once (SIMD)
+                            let freqs = base_freqs * bend_simd;
+
+                            // Calculate 8 phases at once (SIMD multiplication - this is the win!)
+                            let phases_raw = time_simd * freqs;
+                            let phases = phases_raw.to_array();
+
+                            // Sample waveform for each phase (wavetable lookups remain scalar)
+                            for &phase in &phases {
+                                let phase_wrapped = phase.fract(); // Wrap to [0, 1)
+                                *sample_out +=
+                                    note_event.waveform.sample(phase_wrapped) * envelope_amp;
+                            }
                         }
 
-                        let total_duration =
-                            note_event.envelope.total_duration(note_event.duration);
-                        let note_end_with_release = note_event.start_time + total_duration;
+                        // Scalar remainder
+                        for freq_idx in (chunks * 8)..num_freqs {
+                            let freq = note_event.frequencies[freq_idx] * bend_multiplier;
+                            let phase = (time_in_note * freq) % 1.0;
+                            *sample_out += note_event.waveform.sample(phase) * envelope_amp;
+                        }
+                    } else if can_vectorize && SIMD.width() >= 4 && num_freqs >= 4 {
+                        // SSE path: process 4 frequencies at once
+                        let chunks = num_freqs / 4;
+                        let bend_simd = f32x4::splat(bend_multiplier);
+                        let time_simd = f32x4::splat(time_in_note);
 
-                        if time >= note_event.start_time && time < note_end_with_release {
-                            let time_in_note = time - note_event.start_time;
-                            let envelope_amp = note_event
-                                .envelope
-                                .amplitude_at(time_in_note, note_event.duration);
+                        for chunk_idx in 0..chunks {
+                            let base_idx = chunk_idx * 4;
 
-                            // SIMD-optimized polyphonic frequency processing
-                            // Process 8 frequencies at once for 3-6x speedup
-                            use crate::synthesis::simd::SIMD;
-                            use wide::{f32x4, f32x8};
+                            // Load 4 base frequencies
+                            let mut freq_array = [0.0f32; 4];
+                            freq_array
+                                .copy_from_slice(&note_event.frequencies[base_idx..base_idx + 4]);
+                            let base_freqs = f32x4::from(freq_array);
 
-                            let num_freqs = note_event.num_freqs;
+                            // Apply pitch bend to all 4 frequencies at once (SIMD)
+                            let freqs = base_freqs * bend_simd;
 
-                            // Pre-calculate pitch bend (hoisted out of frequency loop for efficiency)
-                            let bend_multiplier = if note_event.pitch_bend_semitones != 0.0 {
-                                let bend_progress = (time_in_note / note_event.duration).min(1.0);
-                                2.0f32
-                                    .powf((note_event.pitch_bend_semitones * bend_progress) / 12.0)
+                            // Calculate 4 phases at once (SIMD multiplication - this is the win!)
+                            let phases_raw = time_simd * freqs;
+                            let phases = phases_raw.to_array();
+
+                            // Sample waveform for each phase (wavetable lookups remain scalar)
+                            for &phase in &phases {
+                                let phase_wrapped = phase.fract(); // Wrap to [0, 1)
+                                *sample_out +=
+                                    note_event.waveform.sample(phase_wrapped) * envelope_amp;
+                            }
+                        }
+
+                        // Scalar remainder
+                        for freq_idx in (chunks * 4)..num_freqs {
+                            let freq = note_event.frequencies[freq_idx] * bend_multiplier;
+                            let phase = (time_in_note * freq) % 1.0;
+                            *sample_out += note_event.waveform.sample(phase) * envelope_amp;
+                        }
+                    } else {
+                        // Scalar fallback (FM synthesis, custom wavetables, or low polyphony)
+                        for freq_idx in 0..num_freqs {
+                            let freq = note_event.frequencies[freq_idx] * bend_multiplier;
+
+                            let sample = if note_event.fm_params.mod_index > 0.0 {
+                                note_event
+                                    .fm_params
+                                    .sample(freq, time_in_note, note_event.duration)
+                            } else if let Some(ref wavetable) = note_event.custom_wavetable {
+                                let phase = (time_in_note * freq) % 1.0;
+                                wavetable.sample(phase)
                             } else {
-                                1.0
+                                let phase = (time_in_note * freq) % 1.0;
+                                note_event.waveform.sample(phase)
                             };
 
-                            // Determine if we can use SIMD path (simple waveforms only)
-                            let can_vectorize = note_event.fm_params.mod_index == 0.0
-                                && note_event.custom_wavetable.is_none();
-
-                            if can_vectorize && SIMD.width() >= 8 && num_freqs >= 8 {
-                                // SIMD path: process 8 frequencies at once
-                                let chunks = num_freqs / 8;
-                                let bend_simd = f32x8::splat(bend_multiplier);
-                                let time_simd = f32x8::splat(time_in_note);
-
-                                for chunk_idx in 0..chunks {
-                                    let base_idx = chunk_idx * 8;
-
-                                    // Load 8 base frequencies
-                                    let mut freq_array = [0.0f32; 8];
-                                    freq_array.copy_from_slice(
-                                        &note_event.frequencies[base_idx..base_idx + 8],
-                                    );
-                                    let base_freqs = f32x8::from(freq_array);
-
-                                    // Apply pitch bend to all 8 frequencies at once (SIMD)
-                                    let freqs = base_freqs * bend_simd;
-
-                                    // Calculate 8 phases at once (SIMD multiplication - this is the win!)
-                                    let phases_raw = time_simd * freqs;
-                                    let phases = phases_raw.to_array();
-
-                                    // Sample waveform for each phase (wavetable lookups remain scalar)
-                                    for &phase in &phases {
-                                        let phase_wrapped = phase.fract(); // Wrap to [0, 1)
-                                        track_value +=
-                                            note_event.waveform.sample(phase_wrapped) * envelope_amp;
-                                    }
-                                }
-
-                                // Scalar remainder
-                                for freq_idx in (chunks * 8)..num_freqs {
-                                    let freq = note_event.frequencies[freq_idx] * bend_multiplier;
-                                    let phase = (time_in_note * freq) % 1.0;
-                                    track_value +=
-                                        note_event.waveform.sample(phase) * envelope_amp;
-                                }
-                            } else if can_vectorize && SIMD.width() >= 4 && num_freqs >= 4 {
-                                // SSE path: process 4 frequencies at once
-                                let chunks = num_freqs / 4;
-                                let bend_simd = f32x4::splat(bend_multiplier);
-                                let time_simd = f32x4::splat(time_in_note);
-
-                                for chunk_idx in 0..chunks {
-                                    let base_idx = chunk_idx * 4;
-
-                                    // Load 4 base frequencies
-                                    let mut freq_array = [0.0f32; 4];
-                                    freq_array.copy_from_slice(
-                                        &note_event.frequencies[base_idx..base_idx + 4],
-                                    );
-                                    let base_freqs = f32x4::from(freq_array);
-
-                                    // Apply pitch bend to all 4 frequencies at once (SIMD)
-                                    let freqs = base_freqs * bend_simd;
-
-                                    // Calculate 4 phases at once (SIMD multiplication - this is the win!)
-                                    let phases_raw = time_simd * freqs;
-                                    let phases = phases_raw.to_array();
-
-                                    // Sample waveform for each phase (wavetable lookups remain scalar)
-                                    for &phase in &phases {
-                                        let phase_wrapped = phase.fract(); // Wrap to [0, 1)
-                                        track_value +=
-                                            note_event.waveform.sample(phase_wrapped) * envelope_amp;
-                                    }
-                                }
-
-                                // Scalar remainder
-                                for freq_idx in (chunks * 4)..num_freqs {
-                                    let freq = note_event.frequencies[freq_idx] * bend_multiplier;
-                                    let phase = (time_in_note * freq) % 1.0;
-                                    track_value +=
-                                        note_event.waveform.sample(phase) * envelope_amp;
-                                }
-                            } else {
-                                // Scalar fallback (FM synthesis, custom wavetables, or low polyphony)
-                                for freq_idx in 0..num_freqs {
-                                    let freq = note_event.frequencies[freq_idx] * bend_multiplier;
-
-                                    let sample = if note_event.fm_params.mod_index > 0.0 {
-                                        note_event.fm_params.sample(
-                                            freq,
-                                            time_in_note,
-                                            note_event.duration,
-                                        )
-                                    } else if let Some(ref wavetable) = note_event.custom_wavetable
-                                    {
-                                        let phase = (time_in_note * freq) % 1.0;
-                                        wavetable.sample(phase)
-                                    } else {
-                                        let phase = (time_in_note * freq) % 1.0;
-                                        note_event.waveform.sample(phase)
-                                    };
-
-                                    track_value += sample * envelope_amp;
-                                }
-                            }
+                            *sample_out += sample * envelope_amp;
                         }
                     }
-                    AudioEvent::Drum(drum_event) => {
-                        // Apply pitch offset: higher pitch = faster playback
-                        let pitch_ratio = 2.0_f32.powf(drum_event.pitch_offset / 12.0);
-                        let drum_duration = drum_event.drum_type.duration() / pitch_ratio;
-                        if time >= drum_event.start_time
-                            && time < drum_event.start_time + drum_duration
-                        {
-                            // Voice stealing: only render if this is the most recent trigger
-                            // This prevents overlapping drums of the same type from stacking
-                            if latest_drum_starts.get(&drum_event.drum_type)
-                                == Some(&drum_event.start_time)
-                            {
-                                let time_in_drum = time - drum_event.start_time;
-                                let sample_index =
-                                    (time_in_drum * sample_rate * pitch_ratio) as usize;
-                                track_value += drum_event.drum_type.sample(sample_index, sample_rate)
-                                    * drum_event.velocity;
-                            }
-                        }
-                    }
-                    AudioEvent::Sample(_) => {
-                        // Samples are pre-rendered above with SIMD for better performance
-                        // They'll be added to track_value after this loop
-                    }
-                    _ => {} // Tempo/time/key signatures don't generate audio
                 }
             }
+        }
 
-            // Add pre-rendered samples (processed with SIMD above)
-            track_value += track.sample_scratch_buffer[i];
+        // Drum stealing only changes at a hit's start/end. Prepare these spans
+        // once per block, retaining the old rule that an older long hit resumes
+        // after a newer shorter hit ends. Equal-time hits still sum together.
+        track.prepared_drums.clear();
+        track.drum_boundaries.clear();
 
-            // Note: Cached notes are already in track_value (read from buffer at loop start)
-
-            *sample_out = track_value;
+        for (index, event) in track.events[start_idx..end_idx].iter().enumerate() {
+            if let AudioEvent::Drum(drum) = event {
+                let ratio = 2.0_f32.powf(drum.pitch_offset / 12.0);
+                let end = drum.start_time + drum.drum_type.duration() / ratio;
+                let first =
+                    frame_at_or_after(drum.start_time, start_time, time_delta, buffer.len());
+                let last = frame_at_or_after(end, start_time, time_delta, buffer.len());
+                if first < last {
+                    track
+                        .prepared_drums
+                        .push((start_idx + index, first, last, ratio));
+                    track.drum_boundaries.extend([first, last]);
+                }
+            }
+        }
+        if !track.prepared_drums.is_empty() {
+            track.drum_boundaries.extend([0, buffer.len()]);
+        }
+        track.drum_boundaries.sort_unstable();
+        track.drum_boundaries.dedup();
+        for span in track.drum_boundaries.windows(2) {
+            let (first, last) = (span[0], span[1]);
+            track.drum_starts.clear();
+            for &(index, begin, end, _) in &track.prepared_drums {
+                if begin <= first && first < end {
+                    let AudioEvent::Drum(drum) = &track.events[index] else {
+                        unreachable!()
+                    };
+                    let latest = track.drum_starts.entry(drum.drum_type).or_insert(f32::MIN);
+                    *latest = latest.max(drum.start_time);
+                }
+            }
+            for &(index, begin, end, ratio) in &track.prepared_drums {
+                if begin > first || first >= end {
+                    continue;
+                }
+                let AudioEvent::Drum(drum) = &track.events[index] else {
+                    unreachable!()
+                };
+                if track.drum_starts.get(&drum.drum_type) != Some(&drum.start_time) {
+                    continue;
+                }
+                for (offset, sample_out) in buffer[first..last].iter_mut().enumerate() {
+                    let time = start_time + (first + offset) as f32 * time_delta;
+                    let sample_index = ((time - drum.start_time) * sample_rate * ratio) as usize;
+                    *sample_out += drum.drum_type.sample(sample_index, sample_rate) * drum.velocity;
+                }
+            }
+        }
+        for (out, sample) in buffer.iter_mut().zip(&track.sample_scratch_buffer) {
+            *out += sample;
         }
 
         // Apply track volume to entire buffer (SIMD-optimized, ~8x faster than per-sample!)
@@ -628,5 +623,116 @@ impl Mixer {
         let right_gain = pan_angle.fast_sin();
 
         (track_value * left_gain, track_value * right_gain)
+    }
+}
+
+fn frame_at_or_after(time: f32, block_start: f32, step: f32, frames: usize) -> usize {
+    let (mut low, mut high) = (0, frames);
+    while low < high {
+        let mid = low + (high - low) / 2;
+        if block_start + mid as f32 * step < time {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    low
+}
+
+#[cfg(test)]
+mod block_preparation_tests {
+    use super::*;
+    use crate::synthesis::{Envelope, Waveform};
+
+    fn compare_to_scalar(mut track: Track) {
+        const RATE: f32 = 4096.0;
+        let mut reference = track.clone();
+        track.prepare_realtime(67);
+        let pan_gain = (std::f32::consts::PI * 0.25).fast_cos();
+        for block in 0..90 {
+            let mut actual = [0.0; 67];
+            let start = block as f32 * 67.0 / RATE;
+            Mixer::process_track_block(
+                &mut track,
+                &mut actual,
+                RATE,
+                start,
+                block * 67,
+                None,
+                #[cfg(feature = "gpu")]
+                None,
+                false,
+                false,
+            );
+            for (i, value) in actual.iter().enumerate() {
+                let time = start + i as f32 / RATE;
+                let expected =
+                    Mixer::process_track_static(&mut reference, time, RATE, block * 67 + i as u64)
+                        .0;
+                assert!(
+                    (value * pan_gain - expected).abs() < 2e-5,
+                    "block {block}, frame {i}: {} != {expected}",
+                    value * pan_gain
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fractional_note_boundaries_and_overlapping_releases_match_scalar() {
+        let mut track = Track::new();
+        let envelope = Envelope::new(0.01, 0.02, 0.6, 0.18);
+        track.add_note_with_waveform_and_envelope(
+            &[80.0, 130.0],
+            0.0131,
+            0.31,
+            Waveform::Sine,
+            envelope,
+        );
+        track.add_note_with_waveform_and_envelope(
+            &[190.0],
+            0.1537,
+            0.023,
+            Waveform::Triangle,
+            envelope,
+        );
+        compare_to_scalar(track);
+    }
+
+    #[test]
+    fn pitched_drum_stealing_ties_and_older_hit_resumption_match_scalar() {
+        use crate::track::events::DrumEvent;
+        let mut track = Track::new();
+        for (kind, start, pitch, velocity) in [
+            (DrumType::Kick, 0.0, -12.0, 0.3),
+            (DrumType::Kick, 0.1037, 24.0, 0.4),
+            (DrumType::Kick, 0.1037, 24.0, 0.2),
+            (DrumType::Snare, 0.0713, 0.0, 0.2),
+        ] {
+            track.events.push(AudioEvent::Drum(DrumEvent {
+                drum_type: kind,
+                start_time: start,
+                pitch_offset: pitch,
+                velocity,
+                spatial_position: None,
+            }));
+        }
+        track.invalidate_time_cache();
+        compare_to_scalar(track);
+    }
+
+    #[test]
+    fn sample_only_blocks_and_empty_future_ranges_match_scalar() {
+        use crate::{synthesis::Sample, track::events::SampleEvent};
+        let mut track = Track::new();
+        track.events.push(AudioEvent::Sample(SampleEvent {
+            sample: Sample::from_mono(vec![0.25; 1024], 4096),
+            start_time: 0.0437,
+            playback_rate: 0.8,
+            volume: 0.7,
+            spatial_position: None,
+        }));
+        track.invalidate_time_cache();
+        compare_to_scalar(track);
     }
 }

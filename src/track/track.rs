@@ -52,6 +52,9 @@ pub struct Track {
     /// Pre-allocated scratch buffer for block audio processing (reused each callback)
     pub(crate) scratch_buffer: Vec<f32>,
     pub(crate) sample_scratch_buffer: Vec<f32>,
+    pub(crate) cached_note_flags: Vec<bool>,
+    pub(crate) drum_boundaries: Vec<usize>,
+    pub(crate) prepared_drums: Vec<(usize, usize, usize, f32)>,
     pub(crate) drum_starts: std::collections::HashMap<DrumType, f32>,
 }
 
@@ -82,7 +85,32 @@ impl Track {
             event_end_prefix: Vec::new(),
             scratch_buffer: Vec::new(),
             sample_scratch_buffer: Vec::new(),
+            cached_note_flags: Vec::new(),
+            drum_boundaries: Vec::new(),
+            prepared_drums: Vec::new(),
             drum_starts: std::collections::HashMap::new(),
+        }
+    }
+
+    pub(crate) fn prepare_realtime(&mut self, frames: usize) {
+        self.prepare_voice(frames);
+        self.scratch_buffer.resize(frames, 0.0);
+    }
+
+    pub(crate) fn prepare_voice(&mut self, frames: usize) {
+        self.ensure_sorted();
+        self.start_time();
+        self.end_time();
+        self.effects.compute_effect_order();
+        if self.events.iter().any(|event| matches!(event, AudioEvent::Sample(_))) {
+            self.sample_scratch_buffer.resize(frames, 0.0);
+        }
+        self.cached_note_flags.resize(self.events.len(), false);
+        let drums = self.events.iter().filter(|event| matches!(event, AudioEvent::Drum(_))).count();
+        if drums > 0 {
+            self.prepared_drums.reserve(drums);
+            self.drum_boundaries.reserve(drums * 2 + 2);
+            self.drum_starts.reserve(drums);
         }
     }
 

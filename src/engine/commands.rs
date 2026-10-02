@@ -11,6 +11,23 @@ pub type SoundId = u64;
 
 /// Commands sent from main thread to audio thread
 pub(crate) enum AudioCommand {
+    PlaySource {
+        id: SoundId,
+        source: Box<super::source::SoundSource>,
+        bus: Option<u64>,
+    },
+    SetEffectBus {
+        id: u64,
+        bus: Box<super::effect_bus::EffectBusState>,
+    },
+    SetEffectBusMix {
+        id: u64,
+        delay: f32,
+        reverb: f32,
+    },
+    RemoveEffectBus {
+        id: u64,
+    },
     Play {
         id: SoundId,
         mixer: Box<crate::track::Mixer>,

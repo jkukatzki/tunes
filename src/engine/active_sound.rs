@@ -3,11 +3,13 @@
 //! Contains state for sounds that are currently playing in the audio engine.
 
 use crate::synthesis::spatial::{SoundCone, SpatialPosition};
+#[cfg(test)]
 use crate::track::Mixer;
 
 /// State for an actively playing sound
 pub(crate) struct ActiveSound {
-    pub mixer: Mixer,
+    pub source: super::source::SoundSource,
+    pub bus: Option<u64>,
     pub duration: f32,
     pub sample_clock: f32,
     pub elapsed_time: f32,
@@ -46,14 +48,24 @@ pub(crate) struct ActiveSound {
 
 impl ActiveSound {
     /// Create a new active sound from a mixer
+    #[cfg(test)]
     pub fn new(mixer: Mixer, looping: bool) -> Self {
-        let duration = if looping {
-            mixer.total_duration()
-        } else {
-            mixer.playback_duration()
-        };
+        Self::from_source(
+            super::source::SoundSource::Mixer(Box::new(mixer)),
+            looping,
+            None,
+        )
+    }
+
+    pub(crate) fn from_source(
+        source: super::source::SoundSource,
+        looping: bool,
+        bus: Option<u64>,
+    ) -> Self {
+        let duration = source.duration(looping);
         Self {
-            mixer,
+            source,
+            bus,
             duration,
             sample_clock: 0.0,
             elapsed_time: 0.0,

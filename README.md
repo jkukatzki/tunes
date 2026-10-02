@@ -6,6 +6,31 @@ Perfect for algorithmic music, game audio, generative art, and interactive insta
 
 > **Performance:** CPU synthesis measured at 100x realtime (uncached) and 20.0x realtime (cached complex compositions) on decade old hardware. SIMD sample playback: 1000+ with true concurrent playback (all samples playing simultaneously)** - can handle 500-1500+ concurrent samples in real-world scenarios.  Optional GPU acceleration available via `gpu` feature - provides minimal benefit on integrated GPUs (~1.0x on i5 6500) but scales with discrete GPU hardware.
 
+## Changes on `pushas-tunes-compat` compared with `master`
+
+This game-integration branch adds browser/iOS audio lifecycle recovery and
+real-time rendering improvements beyond the main `master` branch:
+
+- Browser audio suspension/resume and foreground output recovery, with timing
+  diagnostics and vendored CPAL scheduling fixes; native iOS uses the default
+  device buffer size.
+- Continuous fades, bounded retirement of faded voices, dense active-sound
+  storage, prepared realtime mixers, and a limiter on the final mixed output.
+- Direct track and plain-sample playback avoid constructing a full composition
+  and mixer for each sound. Filtered, spatial, or effected samples retain the
+  existing mixer route.
+- Persistent stereo delay/reverb buses share processing between voices and keep
+  tails after note release. The moni/game piano uses this route, retains filters
+  and distortion per voice, and caches instrument presets.
+- Block-level note/drum preparation and reused scratch storage reduce work in
+  sample loops. Overlapping events, fractional sample starts, final sample
+  frames, and release durations have regression coverage.
+
+The latest validation passes 1,602 library tests and native/WASM game checks.
+Device performance gains are not yet measured. Shared piano effects and removal
+of per-note limiting can change chord dynamics. See the
+[realtime audio review](docs/realtime_audio_review.md) for details and limitations.
+
 ## Table of Contents
 
 - [Features](#features)

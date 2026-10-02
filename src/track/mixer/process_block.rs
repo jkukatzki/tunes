@@ -20,11 +20,7 @@ impl Mixer {
             bus.scratch_buffer.resize(frames * 2, 0.0);
             bus.effects.prepare_stereo_buffer(frames);
             for track in &mut bus.tracks {
-                track.ensure_sorted();
-                track.start_time();
-                track.end_time();
-                track.scratch_buffer.resize(frames, 0.0);
-                track.sample_scratch_buffer.resize(frames, 0.0);
+                track.prepare_realtime(frames);
             }
         }
     }

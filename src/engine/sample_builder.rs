@@ -227,10 +227,7 @@ impl<'a> SamplePlaybackBuilder<'a> {
     // ========== Spectral Effects ==========
 
     /// Add phase vocoder effect for time-stretching and pitch-shifting
-    pub fn phase_vocoder(
-        mut self,
-        phase_vocoder: crate::synthesis::effects::PhaseVocoder,
-    ) -> Self {
+    pub fn phase_vocoder(mut self, phase_vocoder: crate::synthesis::effects::PhaseVocoder) -> Self {
         self.effects.phase_vocoder = Some(phase_vocoder);
         self.effects.compute_effect_order();
         self
@@ -247,10 +244,7 @@ impl<'a> SamplePlaybackBuilder<'a> {
     }
 
     /// Add spectral gate effect for frequency-selective noise gating
-    pub fn spectral_gate(
-        mut self,
-        spectral_gate: crate::synthesis::effects::SpectralGate,
-    ) -> Self {
+    pub fn spectral_gate(mut self, spectral_gate: crate::synthesis::effects::SpectralGate) -> Self {
         self.effects.spectral_gate = Some(spectral_gate);
         self.effects.compute_effect_order();
         self
@@ -297,10 +291,7 @@ impl<'a> SamplePlaybackBuilder<'a> {
     }
 
     /// Add spectral blur effect for frequency smearing
-    pub fn spectral_blur(
-        mut self,
-        spectral_blur: crate::synthesis::effects::SpectralBlur,
-    ) -> Self {
+    pub fn spectral_blur(mut self, spectral_blur: crate::synthesis::effects::SpectralBlur) -> Self {
         self.effects.spectral_blur = Some(spectral_blur);
         self.effects.compute_effect_order();
         self
@@ -579,6 +570,24 @@ impl<'a> SamplePlaybackBuilder<'a> {
                 SampleTransform::TimeStretch(factor) => sample.time_stretch(*factor),
                 SampleTransform::PitchShift(semitones) => sample.pitch_shift(*semitones),
             };
+        }
+
+        // Common dry one-shots bypass composition/track/mixer construction. Keep
+        // spatial/effect/filter requests on the full path until their semantics
+        // can be preserved by a specialised source as well.
+        if self.filter.is_none()
+            && self.spatial_position.is_none()
+            && self.effects.effect_order.is_empty()
+        {
+            return self.engine.play_source(
+                super::source::SoundSource::sample(
+                    sample,
+                    self.speed,
+                    self.volume,
+                    self.pan,
+                ),
+                None,
+            );
         }
 
         // Create composition with all the builder settings

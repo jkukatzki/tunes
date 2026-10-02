@@ -77,3 +77,39 @@ for both channels. The callback still has allocations and synchronization in
 some paths; these changes do not establish a fully bounded real-time engine.
 Avoiding allocation and blocking work in callbacks follows the guidance in
 [PortAudio's callback documentation](https://portaudio.com/docs/v19-doxydocs/writing_a_callback.html).
+
+October 2026 follow-up: shared effects and lighter voice rendering
+
+- The shared moni piano now routes synth voices through one persistent stereo
+  delay/reverb bus. Filters and distortion remain per voice. Each bus channel
+  has independent effect history, and tails continue after notes retire.
+  Global pause freezes the bus; global stop clears its history. Wet/dry changes
+  preserve tails, while replacing effect configuration resets them. Keep the
+  `EffectBus` handle alive with the instrument; dropping it removes its tails
+  and leaves any remaining voices playing dry.
+- `AudioEngine::play_track` prepares a direct track voice without constructing
+  a composition, mixer, or default bus for each note. The piano also caches
+  instrument presets and removes per-note mastering limiters; the existing
+  linked engine output limiter still protects the summed output. Shared effects
+  and removing per-note limiting can change chord dynamics and release sound.
+- Plain sample playback uses a direct sample voice. Requests with filters,
+  effects, or spatial positioning retain the composition route. Direct track
+  and sample voices render into the engine's shared scratch buffer.
+- Notes prepare their frame ranges and rendering choices once per block.
+  Drum processing prepares intervals at hit boundaries, preserving same-time
+  hits and the resumption of an older long hit after a shorter replacement.
+  Cache flags and event scratch storage are reused. This reduces bookkeeping
+  in the sample loop; voice creation is not allocation-free.
+- Scalar-parity tests exposed a sample interpolation defect: SIMD chunks could
+  omit the final frame, and one-frame samples were silent. Both now render
+  consistently regardless of chunk alignment.
+
+Validation: all 1,602 tunes library tests pass, including ten added regressions
+for direct-source parity, fractional event boundaries, overlapping drums,
+sample endings, independent effect channels, shared tails, and playback
+controls. Native and WASM `cargo check --package pushedpeople_game --offline`
+pass, as does the native moni package check. Existing dependency warnings
+remain. No game, audio device, or iOS simulator was opened; device CPU savings
+and audible behavior still need a listening comparison, especially chords,
+retriggers, and long reverb/delay releases. Shared buses currently continue
+processing silence to preserve tails rather than sleeping when inaudible.

@@ -24,6 +24,12 @@ mod commands;
 mod sample_builder;
 mod sound_pool;
 mod output_limiter;
+#[cfg(all(target_arch = "wasm32", feature = "web"))]
+mod web_audio;
+#[cfg(all(target_arch = "wasm32", feature = "web"))]
+mod web_audio_diagnostics;
+#[cfg(all(target_arch = "wasm32", feature = "web"))]
+mod web_audio_recovery;
 #[cfg(test)]
 mod tests;
 #[cfg(not(target_arch = "wasm32"))]
@@ -50,6 +56,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossbeam::channel::{unbounded, Receiver, Sender};
 use crossbeam::epoch::{self, Atomic};
 use dashmap::DashMap;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -75,7 +82,12 @@ pub struct AudioEngine {
     spatial_params: Arc<Atomic<SpatialParams>>, // Lock-free reads via epoch-based reclamation
     sample_rate: f32,
     pub(crate) sample_cache: Arc<DashMap<String, crate::synthesis::Sample>>, // Lock-free sample caching
+    // Remove browser listeners before dropping the stream/context.
+    #[cfg(all(target_arch = "wasm32", feature = "web"))]
+    _web_audio: web_audio::WebAudioLifecycle,
     _stream: cpal::Stream, // Persistent stream, kept alive
+    #[cfg(all(target_arch = "wasm32", feature = "web"))]
+    output_factory: Box<dyn Fn() -> Result<cpal::Stream>>,
     // Info for optional printing
     device_name: String,
     buffer_size: u32,
@@ -88,6 +100,37 @@ pub struct AudioEngine {
 }
 
 impl AudioEngine {
+    /// Suspend browser audio while the page is hidden and resume on return.
+    /// Defaults to false so applications can choose their background policy.
+    #[cfg(all(target_arch = "wasm32", feature = "web"))]
+    pub fn set_pause_when_hidden(&self, enabled: bool) {
+        self._web_audio.set_pause_when_hidden(enabled);
+    }
+
+    /// Reopen browser output once after a hidden-to-visible transition.
+    /// Call from the application's frame loop when foreground-only audio is enabled.
+    /// Preserves voices, command queue, IDs, samples, listener and monitor state.
+    #[cfg(all(target_arch = "wasm32", feature = "web"))]
+    pub fn recover_web_output_on_foreground(&mut self) -> Result<bool> {
+        if !self._web_audio.take_foreground_return() {
+            return Ok(false);
+        }
+        // Prepare a suspended replacement before retiring the old stream.
+        let stream = (self.output_factory)()?;
+        let lifecycle = web_audio::WebAudioLifecycle::new(&stream)?;
+        lifecycle.set_pause_when_hidden(true);
+        let cpal::platform::StreamInner::WebAudio(old) = self._stream.as_inner();
+        let _ = old.audio_context().close();
+        stream.play().map_err(|error| TunesError::AudioEngineError(format!(
+            "Failed to restart browser audio output: {error}"
+        )))?;
+        // Remove old DOM listeners/watchdog before releasing the old stream.
+        self._web_audio = lifecycle;
+        self._stream = stream;
+        web_sys::console::info_1(&"[tunes] Recreated foreground audio output; engine state preserved".into());
+        Ok(true)
+    }
+
     /// Create a new audio engine with default output device
     ///
     /// Uses a moderate buffer size (4096 samples) optimized for pre-rendered playback.
@@ -192,119 +235,143 @@ impl AudioEngine {
             stream_config.buffer_size = cpal::BufferSize::Fixed(buffer_size);
         }
 
-        // Error handler
-        let err_fn = |err| eprintln!("Audio stream error: {}", err);
+        let output_factory = move || {
+            let callback_state_for_stream = callback_state_for_stream.clone();
+            let playing_states_for_stream = playing_states_for_stream.clone();
+            let listener_config_for_stream = listener_config_for_stream.clone();
+            let spatial_params_for_stream = spatial_params_for_stream.clone();
+            let monitor_callback_for_stream = monitor_callback_for_stream.clone();
+            let command_rx = command_rx.clone();
+            // Error handler
+            let err_fn = |err| eprintln!("Audio stream error: {}", err);
 
-        let mut output_limiter = output_limiter::OutputLimiter::new();
+            let mut output_limiter = output_limiter::OutputLimiter::new();
+            #[cfg(all(target_arch = "wasm32", feature = "web"))]
+            let mut diagnostics = web_audio_diagnostics::CallbackDiagnostics::default();
 
-        // Build the persistent output stream
-        let stream = device
-            .build_output_stream(
-                &stream_config,
-                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    // Lock only AudioCallbackState (one lock instead of three!)
-                    // If mutex is poisoned, output silence and return early
-                    let mut state = match callback_state_for_stream.lock() {
-                        Ok(state) => state,
-                        Err(e) => {
-                            eprintln!("Audio callback: mutex poisoned: {}", e);
-                            // Fill buffer with silence
-                            for sample in data.iter_mut() {
-                                *sample = 0.0;
+            // Build the persistent output stream
+            device
+                .build_output_stream(
+                    &stream_config,
+                    move |data: &mut [f32], _info: &cpal::OutputCallbackInfo| {
+                        #[cfg(all(target_arch = "wasm32", feature = "web"))]
+                        let callback_started = web_audio_diagnostics::now_ms();
+                        // Lock only AudioCallbackState (one lock instead of three!)
+                        // If mutex is poisoned, output silence and return early
+                        let mut state = match callback_state_for_stream.lock() {
+                            Ok(state) => state,
+                            Err(e) => {
+                                eprintln!("Audio callback: mutex poisoned: {}", e);
+                                // Fill buffer with silence
+                                for sample in data.iter_mut() {
+                                    *sample = 0.0;
+                                }
+                                return;
                             }
-                            return;
-                        }
-                    };
+                        };
 
-                    // Lock-free reads of spatial audio config via epoch-based reclamation
-                    let guard = epoch::pin();
+                        // Lock-free reads of spatial audio config via epoch-based reclamation
+                        let guard = epoch::pin();
 
-                    // Use defaults if atomic loads return null (graceful degradation)
-                    let default_listener = ListenerConfig::default();
-                    let listener = unsafe {
-                        listener_config_for_stream
-                            .load(Ordering::Acquire, &guard)
-                            .as_ref()
-                    };
-                    let listener = listener.unwrap_or(&default_listener);
+                        // Use defaults if atomic loads return null (graceful degradation)
+                        let default_listener = ListenerConfig::default();
+                        let listener = unsafe {
+                            listener_config_for_stream
+                                .load(Ordering::Acquire, &guard)
+                                .as_ref()
+                        };
+                        let listener = listener.unwrap_or(&default_listener);
 
-                    let default_spatial = SpatialParams::default();
-                    let spatial = unsafe {
-                        spatial_params_for_stream
-                            .load(Ordering::Acquire, &guard)
-                            .as_ref()
-                    };
-                    let spatial = spatial.unwrap_or(&default_spatial);
+                        let default_spatial = SpatialParams::default();
+                        let spatial = unsafe {
+                            spatial_params_for_stream
+                                .load(Ordering::Acquire, &guard)
+                                .as_ref()
+                        };
+                        let spatial = spatial.unwrap_or(&default_spatial);
 
-                    // Destructure state FIRST to get separate mutable references (satisfies borrow checker)
-                    let AudioCallbackState {
-                        ref mut active_sounds,
-                        #[cfg(not(target_arch = "wasm32"))]
-                        ref mut streaming_sounds,
-                        ref mut temp_buffer,
-                        ref mut finished_sounds,
-                        #[cfg(not(target_arch = "wasm32"))]
-                        ref mut finished_streams,
-                    } = *state;
-
-                    // Process all pending commands (non-blocking)
-                    while let Ok(cmd) = command_rx.try_recv() {
-                        handle_command(
-                            cmd,
-                            active_sounds,
+                        // Destructure state FIRST to get separate mutable references (satisfies borrow checker)
+                        let AudioCallbackState {
+                            ref mut active_sounds,
                             #[cfg(not(target_arch = "wasm32"))]
-                            streaming_sounds,
-                            &listener_config_for_stream,
-                            &spatial_params_for_stream,
-                            sample_rate,
-                            &playing_states_for_stream,
-                        );
-                    }
+                            ref mut streaming_sounds,
+                            ref mut temp_buffer,
+                            ref mut finished_sounds,
+                            #[cfg(not(target_arch = "wasm32"))]
+                            ref mut finished_streams,
+                        } = *state;
 
-                    // Mix all active sounds into the output buffer (allocation-free)
-                    mix_sounds(
-                        data,
-                        active_sounds,
-                        temp_buffer,
-                        finished_sounds,
-                        listener,
-                        spatial,
-                        sample_rate,
-                        channels,
-                    );
-
-                    // Remove finished sounds from the lock-free playing_states map
-                    // so is_playing() stays accurate without touching this mutex
-                    for &id in finished_sounds.iter() {
-                        playing_states_for_stream.remove(&id);
-                    }
-
-                    // Mix streaming sounds into the output buffer
-                    #[cfg(not(target_arch = "wasm32"))]
-                    mix_streaming_sounds(data, streaming_sounds, finished_streams, channels);
-
-                    output_limiter.process(data, channels, sample_rate);
-
-                    // Visualization must never wait for UI-side callback registration.
-                    if let Ok(callback_guard) = monitor_callback_for_stream.try_lock() {
-                        if let Some(ref callback) = *callback_guard {
-                            callback(data);
+                        // Process all pending commands (non-blocking)
+                        while let Ok(cmd) = command_rx.try_recv() {
+                            handle_command(
+                                cmd,
+                                active_sounds,
+                                #[cfg(not(target_arch = "wasm32"))]
+                                streaming_sounds,
+                                &listener_config_for_stream,
+                                &spatial_params_for_stream,
+                                sample_rate,
+                                &playing_states_for_stream,
+                            );
                         }
-                    }
 
-                    // Guard dropped here - safe to reclaim old epochs
-                },
-                err_fn,
-                None,
-            )
-            .map_err(|e| {
-                TunesError::AudioEngineError(format!("Failed to build output stream: {}", e))
-            })?;
+                        // Mix all active sounds into the output buffer (allocation-free)
+                        mix_sounds(
+                            data,
+                            active_sounds,
+                            temp_buffer,
+                            finished_sounds,
+                            listener,
+                            spatial,
+                            sample_rate,
+                            channels,
+                        );
+
+                        // Remove finished sounds from the lock-free playing_states map
+                        // so is_playing() stays accurate without touching this mutex
+                        for &id in finished_sounds.iter() {
+                            playing_states_for_stream.remove(&id);
+                        }
+
+                        // Mix streaming sounds into the output buffer
+                        #[cfg(not(target_arch = "wasm32"))]
+                        mix_streaming_sounds(data, streaming_sounds, finished_streams, channels);
+
+                        output_limiter.process(data, channels, sample_rate);
+
+                        // Visualization must never wait for UI-side callback registration.
+                        if let Ok(callback_guard) = monitor_callback_for_stream.try_lock() {
+                            if let Some(ref callback) = *callback_guard {
+                                callback(data);
+                            }
+                        }
+
+                        #[cfg(all(target_arch = "wasm32", feature = "web"))]
+                        diagnostics.record(
+                            callback_started,
+                            _info,
+                            data.len() / channels,
+                            sample_rate,
+                        );
+
+                        // Guard dropped here - safe to reclaim old epochs
+                    },
+                    err_fn,
+                    None,
+                )
+                .map_err(|e| {
+                    TunesError::AudioEngineError(format!("Failed to build output stream: {}", e))
+                })
+        };
+        let stream = output_factory()?;
 
         // Start the stream
         stream.play().map_err(|e| {
             TunesError::AudioEngineError(format!("Failed to start audio stream: {}", e))
         })?;
+
+        #[cfg(all(target_arch = "wasm32", feature = "web"))]
+        let web_audio = web_audio::WebAudioLifecycle::new(&stream)?;
 
         Ok(Self {
             command_tx,
@@ -315,7 +382,11 @@ impl AudioEngine {
             spatial_params,
             sample_rate,
             sample_cache: Arc::new(DashMap::new()),
+            #[cfg(all(target_arch = "wasm32", feature = "web"))]
+            _web_audio: web_audio,
             _stream: stream,
+            #[cfg(all(target_arch = "wasm32", feature = "web"))]
+            output_factory: Box::new(output_factory),
             device_name,
             buffer_size,
             channels,

@@ -3,6 +3,7 @@
 //! Commands are sent from the main thread to the audio thread via a lock-free channel.
 
 use crate::synthesis::spatial::{SoundCone, SpatialParams, SpatialPosition};
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
 
 /// Unique identifier for playing sounds

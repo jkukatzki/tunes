@@ -259,7 +259,6 @@ use wasm_bindgen::prelude::*;
 #[wasm_bindgen]
 pub fn run_web_demo() -> std::result::Result<(), JsValue> {
     use crate::prelude::*;
-    use std::sync::Mutex;
 
     // Set panic hook for better error messages in the browser console
     console_error_panic_hook::set_once();

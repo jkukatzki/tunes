@@ -11,8 +11,11 @@ use crate::synthesis::simd::{SimdWidth, SIMD};
 use crate::synthesis::spatial::{calculate_spatial_with_cone, ListenerConfig, SpatialParams, Vec3};
 use crossbeam::epoch::{self, Atomic, Owned};
 use dashmap::DashMap;
+#[cfg(not(target_arch = "wasm32"))]
 use ringbuf::{traits::Split, HeapRb};
-use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread;
@@ -69,7 +72,7 @@ pub(crate) fn handle_command(
     #[cfg(not(target_arch = "wasm32"))] streaming_sounds: &mut SoundPool<StreamingSound>,
     listener_atomic: &Arc<Atomic<ListenerConfig>>,
     spatial_atomic: &Arc<Atomic<SpatialParams>>,
-    sample_rate: f32,
+    _sample_rate: f32,
     playing_states: &DashMap<SoundId, ()>,
 ) {
     match cmd {
@@ -238,7 +241,7 @@ pub(crate) fn handle_command(
             pan,
         } => {
             // Create ring buffer (5 seconds of stereo audio at 44.1kHz = ~441000 samples)
-            let ring_buffer_size = (sample_rate * 5.0 * 2.0) as usize;
+            let ring_buffer_size = (_sample_rate * 5.0 * 2.0) as usize;
             let ring_buffer = HeapRb::<f32>::new(ring_buffer_size);
             let (ring_producer, ring_consumer) = ring_buffer.split();
 

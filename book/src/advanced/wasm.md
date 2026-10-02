@@ -397,13 +397,19 @@ basic-http-server .
 **Solutions:**
 
 1. **Check browser console** for errors
-2. **User interaction required:** Most browsers require user interaction before playing audio:
+2. **User interaction required:** Stream initialization does not mean the browser
+   has allowed playback. With the `web` feature, Tunes resumes its own audio
+   context directly on trusted touch, pointer, click, and keyboard events. If
+   loading WASM finishes after the initial Play tap, tap the game again. Async
+   downloads can outlive Safari's user activation.
 
 ```javascript
-// Wait for user click
-document.getElementById('playButton').addEventListener('click', async () => {
-    await init();
-    play_music();  // Now it will work
+// Finish loading WASM before enabling the play button.
+await init();
+const playButton = document.getElementById('playButton');
+playButton.disabled = false;
+playButton.addEventListener('click', () => {
+    play_music();
 });
 ```
 
@@ -414,6 +420,99 @@ if (!window.AudioContext && !window.webkitAudioContext) {
     alert('Web Audio API not supported');
 }
 ```
+
+On iPhone/iPad, check the `[tunes] AudioContext state=...` console messages.
+`Suspended` before the first in-game tap is expected; look for `Running` after
+the tap. Resume failures are logged separately. Older web-sys versions may show
+Safari's `interrupted` state as an unnamed enum variant; it is still resumed.
+Tunes also attempts recovery when the page becomes visible again, and retains
+gesture listeners until the engine is dropped. Keep the engine alive throughout
+playback.
+
+If sound works only when iPhone Silent Mode is off, the host page can request
+media playback behavior before creating the engine:
+
+```javascript
+try {
+    if (navigator.audioSession) navigator.audioSession.type = 'playback';
+} catch (error) {
+    console.warn('Could not select playback audio session', error);
+}
+```
+
+This allows playback through Silent Mode on supporting browsers, but can
+interrupt audio from other apps. It affects the entire page, so Tunes leaves
+this policy to the host application. Browsers without Audio Session support
+retain their default behavior. User-gesture activation is still required.
+
+For foreground-only playback, call `engine.set_pause_when_hidden(true)` with
+the `web` feature. Tunes then suspends the context on visibility/page-hide events
+and attempts to resume on return. The default is false. The host page should also
+return `navigator.audioSession.type` to `"auto"` while hidden and restore
+`"playback"` when visible to release media priority in the background.
+
+On foreground return, Tunes also verifies that the audio clock advances.
+Safari can report `Running` while its clock remains frozen, or deliver an
+interruption after the visibility event. A bounded recovery check retries
+resume for suspended contexts, or cycles suspend/resume for an interrupted or
+frozen running context. It waits at least 500 ms before checking and makes at
+most three recovery attempts per return/activation. Hiding the page cancels
+the check; a new gesture permits retrying. This preserves the engine and its
+cached samples and does not start duplicate CPAL scheduling workers.
+`[tunes] Recovering foreground AudioContext` identifies these attempts in logs.
+
+The foreground watchdog also checks CPAL's buffer chains independently of the
+context clock. An expired buffer whose completion callback did not run is
+replaced, with stale callbacks rejected to avoid duplicate chains. A
+`[tunes] Restarted ... stalled audio buffer chain(s)` warning identifies this
+recovery. After startup and each return, `[tunes] Foreground audio health`
+reports clock progress and rendered buffers over the preceding check interval.
+Positive values confirm clock/callback activity, not audible device output.
+
+For applications affected by silent output despite a moving clock and active
+callbacks, call `engine.recover_web_output_on_foreground()` from the frame loop
+with foreground-only audio enabled. It replaces the output stream/AudioContext
+once per hidden-to-visible transition, preserving mixer state, sound IDs,
+commands, decoded samples and configuration. Duplicate visibility/pageshow
+events do not trigger extra replacements. The game opts into this workaround.
+The new context retains gesture-resume listeners if the browser requires a tap.
+The old stream detaches its sources, clears startup timers and releases callback
+closures. A `Recreated foreground audio output; engine state preserved` log
+confirms replacement, but device listening is still needed to verify recovery.
+
+To verify on a physical device, play both a synthesized note and a loaded sample,
+switch apps or lock/unlock the screen, then return and tap again. Also change the
+game's audio buffer setting if it recreates the engine. Repeat on desktop to
+check for regressions. If the context reaches `Running` but remains silent,
+record the iOS/browser version, output route, media volume, Silent Mode setting,
+and console messages; context state alone does not prove audible output.
+
+### Stuttering while the context is running
+
+With CPAL 0.15.3, WebAudio mixing and scheduling run on the browser main
+thread using two `AudioBufferSourceNode` chains. At 2048 frames and 44100 Hz,
+each buffer lasts about 46 ms. Game frames, decoding, and synthesis share that
+thread. The backend advances a playback cursor without resetting it when it
+falls behind `AudioContext.currentTime`, so a stall can leave subsequent buffers
+scheduled in the past. Tunes uses a local patch in `vendor/cpal` that resets an
+expired timestamp to `currentTime + 25 ms`, checking before rendering and again
+before scheduling. Normal future timestamps remain contiguous. The initial
+cause of a backlog can vary; recovery does not require identifying that cause.
+A running context alone does not establish timely output.
+
+Tunes reports `[tunes] Audio timing` warnings at most once every five seconds
+when callbacks miss their scheduled start. `late_at_entry` and `max_lateness`
+measure how far scheduling was already behind before mixing; `max_render`
+measures callback work, including commands, mixing, and monitoring. These are
+CPU-side deadline estimates, not measurements of the device's audio output.
+Backgrounding/resuming may also produce warnings; collect logs while the page
+is visible and playback is stuttering.
+
+For a comparison, rebuild the WASM after changing Rust code, verify that the
+browser loads that build, and compare the same sound and buffer setting. Test
+sample playback and synthesis separately. Increasing the buffer from 2048 to
+4096 can help identify scheduling pressure, but increases latency. A release build also helps separate
+development-build overhead from a source regression.
 
 ### Build Errors
 

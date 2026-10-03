@@ -14,14 +14,14 @@ fi
 required=(cargo wasm-bindgen node rsync)
 if [[ "$profile" == release ]]; then required+=("${WASM_OPT:-wasm-opt}"); fi
 for tool in "${required[@]}"; do command -v "$tool" >/dev/null || { echo "Missing tool: $tool" >&2; exit 1; }; done
-if [[ "${WASM_SIMD:-0}" == 1 ]]; then export RUSTFLAGS="${RUSTFLAGS:-} -C target-feature=+simd128"; fi
+if [[ "${WASM_SIMD:-1}" == 1 ]]; then export RUSTFLAGS="${RUSTFLAGS:-} -C target-feature=+simd128"; fi
 target_dir="${CARGO_TARGET_DIR:-$dsp_dir/target}"
 stage_dir="$(mktemp -d "$dsp_dir/.package.XXXXXX")"
 trap 'rm -rf "$stage_dir"' EXIT
 cargo build --locked --manifest-path "$dsp_dir/Cargo.toml" --lib --target wasm32-unknown-unknown --profile "$profile" --target-dir "$target_dir"
 wasm-bindgen "$target_dir/wasm32-unknown-unknown/$profile_dir/tunes_web_dsp.wasm" --target web --out-dir "$stage_dir" --out-name tunes_web_dsp --no-typescript
 if [[ "$profile" == release ]]; then node "$dsp_dir/scripts/optimize-wasm.mjs" "$stage_dir/tunes_web_dsp_bg.wasm"; fi
-for file in bridge.js bridge.d.ts command-queue.mjs worker.js output-worklet.js index.html; do cp "$dsp_dir/web/$file" "$stage_dir/"; done
+for file in bridge.js bridge.d.ts command-queue.mjs adaptive-buffer.mjs render-buffer.mjs worker.js output-worklet.js index.html; do cp "$dsp_dir/web/$file" "$stage_dir/"; done
 cp "$dsp_dir/../LICENSE-MIT" "$dsp_dir/../LICENSE-APACHE" "$stage_dir/"
 cp "$dsp_dir/../vendor/cpal/LICENSE" "$stage_dir/CPAL-LICENSE"
 cp "$dsp_dir/README.md" "$stage_dir/README.md"

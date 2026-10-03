@@ -48,6 +48,9 @@ real-time rendering improvements beyond the main `master` branch:
   priorities and repeated-incidental-sample limits. Native streams count toward
   this budget. Playback status uses fixed atomic slots; spatial settings are
   callback-owned values rather than allocated atomic snapshots.
+- Ordinary single-note synthesis resolves its wavetable once per block; indexed
+  command coalescing avoids repeated queue scans. Measured CPU reductions and
+  sample-parity results are recorded in the realtime audio review.
 - Track/bus RMS scans run only for active sidechain consumers. Prepared render
   chunks limit scratch growth for larger device callbacks.
 - The game's WASM build now uses a separate DSP worker and AudioWorklet through
@@ -59,7 +62,7 @@ real-time rendering improvements beyond the main `master` branch:
   The user reports improved integrated gameplay on iPhone; systematic validation
   across devices and browsers remains part of the release checklist.
 
-The latest library validation passes 1,619 tests. Native/WASM game checks and the
+The latest library validation passes 1,621 tests. Native/WASM game checks and the
 separate worker WASM check pass.
 Device performance gains are not yet measured. Shared piano effects and removal
 of per-note limiting can change chord dynamics. See the

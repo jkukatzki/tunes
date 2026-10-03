@@ -1,13 +1,13 @@
 //! Device-independent renderer for dedicated workers and offline verification.
 use super::{
-    callback::{handle_command, mix_sounds, AudioCallbackState},
-    command_queue::{CommandSender, COMMANDS_PER_CALLBACK},
+    BusEffects, VoicePriority,
+    callback::{AudioCallbackState, handle_command, mix_sounds},
+    command_queue::{COMMANDS_PER_CALLBACK, CommandSender},
     commands::{AudioCommand, SoundId},
     output_limiter::OutputLimiter,
     playing_states::PlayingStates,
     source::SoundSource,
     voice_budget::VoiceOptions,
-    BusEffects, VoicePriority,
 };
 use crate::{synthesis::Sample, track::Track};
 use std::sync::Arc;
@@ -27,7 +27,7 @@ pub struct AudioRenderer {
 impl AudioRenderer {
     pub fn new(sample_rate: f32, frames: usize) -> Self {
         assert!(sample_rate.is_finite() && (8000.0..=192000.0).contains(&sample_rate));
-        assert!((1..=2048).contains(&frames));
+        assert!((1..=8192).contains(&frames));
         let playing = Arc::new(PlayingStates::new());
         let mut state = AudioCallbackState::new();
         state.temp_buffer.resize(frames * 32, 0.0);
@@ -40,6 +40,12 @@ impl AudioRenderer {
             rate: sample_rate,
             frames,
         }
+    }
+    /// Change the render quantum between worker jobs without losing voices or effects.
+    pub fn set_block_frames(&mut self, frames: usize) {
+        assert!((1..=8192).contains(&frames));
+        self.state.temp_buffer.resize(frames * 32, 0.0);
+        self.frames = frames;
     }
     fn play(
         &self,
@@ -222,6 +228,65 @@ impl Drop for AudioRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn resizing_preserves_sample_position_and_output() {
+        let sample = Sample::from_mono(
+            (0..48000).map(|i| (i as f32 * 0.01).sin() * 0.1).collect(),
+            48000,
+        );
+        let mut changing = AudioRenderer::new(48000.0, 512);
+        let mut reference = AudioRenderer::new(48000.0, 512);
+        assert!(changing.play_sample(1, sample.clone(), 1.0, 1.0, 0.0));
+        assert!(reference.play_sample(1, sample, 1.0, 1.0, 0.0));
+        for frames in [512, 8192, 1024, 4096, 2048, 512] {
+            changing.set_block_frames(frames);
+            let mut output = vec![0.0; frames * 2];
+            changing.render(&mut output);
+            let mut expected = vec![0.0; frames * 2];
+            for chunk in expected.chunks_mut(1024) {
+                reference.render(chunk);
+            }
+            let max_error = output
+                .iter()
+                .zip(&expected)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0_f32, f32::max);
+            assert!(
+                max_error < 0.0001,
+                "sample mismatch at {frames} frames: {max_error}"
+            );
+            assert!(changing.is_playing(1));
+        }
+    }
+    #[test]
+    fn resizing_keeps_synth_and_effect_bus_alive() {
+        use crate::synthesis::{Delay, Envelope, Waveform};
+        let mut renderer = AudioRenderer::new(48000.0, 512);
+        let mut track = Track::new();
+        track.add_note_with_waveform_and_envelope(
+            &[220.0],
+            0.0,
+            10.0,
+            Waveform::Sine,
+            Envelope::new(0.01, 0.1, 0.5, 0.1),
+        );
+        assert!(renderer.set_bus(
+            1,
+            BusEffects {
+                delay: Some(Delay::with_sample_rate(0.01, 0.5, 0.3, 48000.0)),
+                reverb: None
+            }
+        ));
+        assert!(renderer.play_track(1, track, Some(1), VoicePriority::Normal));
+        for frames in [512, 8192, 1024, 4096, 2048, 512] {
+            renderer.set_block_frames(frames);
+            let mut output = vec![0.0; frames * 2];
+            renderer.render(&mut output);
+            assert!(output.iter().all(|v| v.is_finite()));
+            assert!(output.iter().any(|v| v.abs() > 0.001));
+            assert!(renderer.is_playing(1));
+        }
+    }
     #[test]
     fn worker_renderer_plays_and_retires_without_opening_a_device() {
         let mut renderer = AudioRenderer::new(44100.0, 512);

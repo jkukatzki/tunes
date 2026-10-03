@@ -4,14 +4,16 @@
 <title>Tunes worker audio test</title>
 <style>body{font:18px system-ui;max-width:48rem;margin:2rem auto;padding:1rem}button{font:inherit;margin:.4rem;padding:.7rem}pre{white-space:pre-wrap}</style>
 <h1>Tunes worker audio test</h1>
-<p>Start audio, then block the main thread. The sustained chord should continue smoothly while the page freezes. Also test minimizing and reopening the page. This is a separate test renderer, not the game's active backend.</p>
-<button id="start">Start chord</button><button id="block" disabled>Block main thread for 2 seconds</button><button id="release" disabled>Release chord</button><button id="stop" disabled>Stop audio</button>
+<p>Start audio, then block the main thread. The sustained chord should continue smoothly while the page freezes. Also test minimizing and reopening the page. This diagnostic page uses the same worker renderer as the game. Notes last 30 seconds; restart for another run. Requests above 96 voices exercise voice stealing.</p>
+<label>Requested voices <select id="voices"><option>3</option><option>12</option><option>48</option><option>96</option><option>128</option></select></label>
+<button id="start">Start voices</button><button id="block" disabled>Block main thread for 2 seconds</button><button id="release" disabled>Release chord</button><button id="stop" disabled>Stop audio</button>
 <pre id="status">Ready. Use headphones or a comfortable volume.</pre>
 <script type="module">
 import { createWorkerAudio } from './bridge.js';
 let audio;
 const status = document.querySelector('#status');
 const reports = {};
+let voiceCount=3;
 document.querySelector('#start').onclick = async () => {
   if (audio) return;
   document.querySelector('#start').disabled = true;
@@ -20,8 +22,10 @@ document.querySelector('#start').onclick = async () => {
       reports[data.type] = data;
       status.textContent = JSON.stringify(reports, null, 2);
     }});
+    voiceCount=Number(document.querySelector('#voices').value);
+    reports.workload={requestedVoices:voiceCount,normalVoiceLimit:96,durationSeconds:30};
     audio.command('effects', .12, .2);
-    [261.63,329.63,392].forEach((hz,i) => audio.command('note', i+1,hz,3,.3,0,.02,.2,.6,.6));
+    for(let i=0;i<voiceCount;i++) audio.command('note',i+1,110*2**((i%36)/12),2,.04,(i%3-1)*.4,.02,.2,.6,.6);
     for(const id of ['block','release','stop']) document.getElementById(id).disabled=false;
   } catch(error) {status.textContent=String(error);document.querySelector('#start').disabled=false;}
 };
@@ -29,7 +33,7 @@ document.querySelector('#block').onclick = () => {
   const until = performance.now()+2000;
   while(performance.now()<until) { /* Deliberately stall only the main thread. */ }
 };
-document.querySelector('#release').onclick = () => [1,2,3].forEach(id => audio.command('release',id,.6));
+document.querySelector('#release').onclick = () => {for(let id=1;id<=voiceCount;id++)audio.command('release',id,.6);};
 document.querySelector('#stop').onclick = async () => {
   await audio.close();audio=null;
   document.querySelector('#start').disabled=false;

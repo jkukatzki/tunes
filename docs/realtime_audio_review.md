@@ -191,5 +191,60 @@ Integrated gameplay device validation remains outstanding; no game build or
 simulator was run by the agent. A disassembly
 of the existing packaged game artifact found zero SIMD instructions. The wrapper
 now provides instruction inspection and a repeatable size/speed/SIMD benchmark;
-`WASM_SIMD=1` explicitly opts builds into SIMD rather than inferring it from the
+SIMD is enabled by default, with `WASM_SIMD=0` available for compatibility
+comparisons. Instruction inspection verifies the output independently of the
 dispatcher's lane label.
+
+
+Measured optimization follow-up (Apple M4 / Node 24, October 3)
+
+The ordinary, unbent single-frequency oscillator now resolves its built-in
+wavetable once per block and performs phase wrapping once per sample. It keeps
+the existing per-sample time arithmetic, interpolation and ADSR; FM, custom tables,
+pitch bends and polyphonic events retain their existing path. Parameter updates
+now use a preallocated index for the trailing coalescible command run instead of
+scanning that run on every update. Barriers, partial drains, reserved release
+capacity and emergency-stop behavior remain covered by tests.
+
+Fresh isolated O3 builds, alternated baseline/candidate with six measured rounds
+per workload, gave these mean controls+render+cleanup times for 96 voices at 48 kHz:
+
+| Workload | Baseline | Optimized | Reduction |
+| --- | ---: | ---: | ---: |
+| Synth | 0.399 ms | 0.248 ms | 37.8% |
+| Samples | 0.275 ms | 0.279 ms | -1.4% (within observed run variation) |
+| Mixed | 0.336 ms | 0.264 ms | 21.5% |
+| Churn | 0.519 ms | 0.367 ms | 29.4% |
+| Controls | 0.489 ms | 0.335 ms | 31.4% |
+
+A separate SIMD build measured 0.218 ms for sample playback and contained
+5,237 SIMD instructions. SIMD is now the build default; this is a desktop measurement, not
+an iPhone scheduling result. Both candidates matched the baseline bit-for-bit for
+7,864,320 compared samples, covering four waveforms, effects, pan/fades, overload,
+PCM rates and sample endings. The candidate sweep before output-buffer reuse covered 50 cases /
+150,000 measured blocks with finite non-silent output and one 13.7 ms CPU-budget
+outlier; its cause was not established.
+All 1,621 library tests and native/WASM game checks pass. No game build or deployment
+was performed; only isolated DSP artifacts were rebuilt for this experiment.
+
+Raw timings, build hashes, configuration and parity results are in
+[`web-dsp/benchmarks/2026-10-03-optimization.json`](../web-dsp/benchmarks/2026-10-03-optimization.json).
+Use `benchmark.mjs <distribution> --focus` to repeat the 96-voice sweep, and
+`compare-output.mjs <baseline> <candidate>` to compare rendered samples.
+
+
+The worker now borrows a reusable view of the persistent WASM output buffer and
+copies directly into one of the four transferable PCM blocks. This eliminates the
+intermediate Rust `Vec` clone and wasm-bindgen-owned JavaScript output copy. The
+helper refreshes views after memory growth and supports old modules via `render()`.
+The old copying API remains available. The default benchmark follows the worker's
+borrowed-buffer path; `--owned-output` forces the compatibility path for comparison.
+
+On the same final WASM artifact, owned/borrowed comparisons showed roughly 0–2.4%
+mean-time differences at 96 voices/48 kHz, so the larger synthesis gains above
+must not be attributed to copy removal. The final borrowed-buffer full sweep
+had zero CPU-budget overruns in 150,000 measured blocks (maximum 3.56 ms), and
+again matched 7,864,320 baseline samples exactly. This does not establish the
+cause of the earlier isolated outlier or guarantee device scheduling. All raw
+runs, including that outlier, remain in the report. The final default artifacts
+were left under `/tmp/tunes-opt-buffered`; game bundles were not replaced.

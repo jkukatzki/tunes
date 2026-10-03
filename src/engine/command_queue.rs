@@ -10,9 +10,16 @@ pub(crate) const COMMANDS_PER_CALLBACK: usize = 64;
 const NORMAL_CAPACITY: usize = 256;
 const CAPACITY: usize = 384;
 
+struct PendingCommands {
+    commands: VecDeque<AudioCommand>,
+    // Only the trailing run of parameter updates is indexed. Ordering barriers
+    // clear the index; draining shifts surviving indices without allocation.
+    parameters: ahash::AHashMap<(u8, u64), usize>,
+}
+
 #[derive(Clone)]
 pub(crate) struct CommandSender(
-    Arc<Mutex<VecDeque<AudioCommand>>>,
+    Arc<Mutex<PendingCommands>>,
     Arc<super::playing_states::PlayingStates>,
     Arc<AtomicBool>,
     Arc<AtomicBool>,
@@ -26,7 +33,10 @@ impl CommandSender {
     }
     pub fn with_states(states: Arc<super::playing_states::PlayingStates>) -> Self {
         Self(
-            Arc::new(Mutex::new(VecDeque::with_capacity(CAPACITY))),
+            Arc::new(Mutex::new(PendingCommands {
+                commands: VecDeque::with_capacity(CAPACITY),
+                parameters: ahash::AHashMap::with_capacity(CAPACITY),
+            })),
             states,
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(true)),
@@ -48,7 +58,8 @@ impl CommandSender {
 
         if let Ok(mut queue) = self.0.lock() {
             self.3.store(false, Ordering::Release);
-            queue.clear();
+            queue.commands.clear();
+            queue.parameters.clear();
         }
     }
     pub fn same_channel(&self, other: &Self) -> bool {
@@ -66,6 +77,7 @@ impl CommandSender {
         }
         if let AudioCommand::RemoveEffectBus { id } = &command {
             if queue
+                .commands
                 .iter()
                 .any(|c| matches!(c, AudioCommand::RemoveEffectBus {id: other} if id == other))
             {
@@ -74,15 +86,11 @@ impl CommandSender {
         }
         // Coalesce only within the trailing parameter-update run. A play, fade,
         // pause, or stop is an ordering barrier, so fade starting gains are intact.
-        if let Some(key) = command.parameter_key() {
-            for pending in queue.iter_mut().rev() {
-                let Some(pending_key) = pending.parameter_key() else {
-                    break;
-                };
-                if key == pending_key {
-                    *pending = command;
-                    return Ok(());
-                }
+        let parameter_key = command.parameter_key();
+        if let Some(key) = parameter_key {
+            if let Some(&index) = queue.parameters.get(&key) {
+                queue.commands[index] = command;
+                return Ok(());
             }
         }
         let limit = if command.is_release() {
@@ -90,14 +98,14 @@ impl CommandSender {
         } else {
             NORMAL_CAPACITY
         };
-        if queue.len() >= limit {
+        if queue.commands.len() >= limit {
             if !command.is_release() {
                 return Err(());
             }
             // Catastrophic control overload: cancel pending attacks and stop all
             // voices instead of losing a note-off. Destruction happens HERE on
             // the producer. Bus lifecycle commands retain their FIFO ordering.
-            queue.retain(|pending| {
+            queue.commands.retain(|pending| {
                 match pending {
                     AudioCommand::Play { id, .. } | AudioCommand::PlaySource { id, .. } => {
                         self.1.remove(id);
@@ -109,15 +117,22 @@ impl CommandSender {
                     AudioCommand::SetEffectBus { .. } | AudioCommand::RemoveEffectBus { .. }
                 )
             });
+            queue.parameters.clear();
             self.2.store(true, Ordering::Release);
             if !matches!(command, AudioCommand::RemoveEffectBus { .. }) {
                 return Ok(());
             }
-            if queue.len() == CAPACITY {
+            if queue.commands.len() == CAPACITY {
                 return Err(());
             }
         }
-        queue.push_back(command);
+        if let Some(key) = parameter_key {
+            let index = queue.commands.len();
+            queue.parameters.insert(key, index);
+        } else {
+            queue.parameters.clear();
+        }
+        queue.commands.push_back(command);
         Ok(())
     }
     pub fn take_batch(&self, batch: &mut Vec<AudioCommand>) {
@@ -128,12 +143,22 @@ impl CommandSender {
         if self.2.swap(false, Ordering::AcqRel) {
             batch.push(AudioCommand::StopAll);
         }
+        let mut drained = 0;
         for _ in batch.len()..COMMANDS_PER_CALLBACK {
-            let Some(command) = queue.pop_front() else {
+            let Some(command) = queue.commands.pop_front() else {
                 break;
             };
             batch.push(command);
+            drained += 1;
         }
+        queue.parameters.retain(|_, index| {
+            if *index < drained {
+                false
+            } else {
+                *index -= drained;
+                true
+            }
+        });
     }
 }
 
@@ -191,7 +216,7 @@ mod tests {
             .unwrap();
         }
         tx.send(AudioCommand::Stop { id: 999 }).unwrap();
-        assert!(tx.0.lock().unwrap().len() <= CAPACITY);
+        assert!(tx.0.lock().unwrap().commands.len() <= CAPACITY);
         let mut batch = Vec::with_capacity(COMMANDS_PER_CALLBACK);
         tx.take_batch(&mut batch);
         assert!(matches!(batch[0], AudioCommand::StopAll));
@@ -231,6 +256,33 @@ mod tests {
         assert!(matches!(batch[1], AudioCommand::FadeOut { .. }));
     }
     #[test]
+    fn indexed_updates_match_fifo_after_partial_drains_and_wraparound() {
+        let tx = CommandSender::new();
+        let mut reference: VecDeque<(u64, f32)> = VecDeque::new();
+        for round in 0..20 {
+            for id in 1..=150 {
+                let pan = (round as f32 + id as f32) / 200.0;
+                tx.send(AudioCommand::SetPan { id, pan }).unwrap();
+                if let Some(entry) = reference.iter_mut().find(|entry| entry.0 == id) {
+                    entry.1 = pan;
+                } else {
+                    reference.push_back((id, pan));
+                }
+            }
+            let mut batch = Vec::new();
+            tx.take_batch(&mut batch);
+            assert_eq!(batch.len(), COMMANDS_PER_CALLBACK);
+            for actual in batch {
+                let expected = reference.pop_front().unwrap();
+                match actual {
+                    AudioCommand::SetPan { id, pan } => assert_eq!((id, pan), expected),
+                    _ => panic!("unexpected command"),
+                }
+            }
+        }
+    }
+
+    #[test]
     fn release_capacity_is_reserved_and_drain_is_bounded() {
         let tx = CommandSender::new();
         for id in 0..NORMAL_CAPACITY {
@@ -247,7 +299,7 @@ mod tests {
         tx.take_batch(&mut batch);
         assert_eq!(batch.len(), COMMANDS_PER_CALLBACK);
         assert_eq!(
-            tx.0.lock().unwrap().len(),
+            tx.0.lock().unwrap().commands.len(),
             NORMAL_CAPACITY + 2 - COMMANDS_PER_CALLBACK
         );
     }

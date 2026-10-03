@@ -31,7 +31,7 @@ try {
     "-o",
     output,
   ];
-  if (process.env.WASM_SIMD === "1") args.push("--enable-simd");
+  if ((process.env.WASM_SIMD || "1") === "1") args.push("--enable-simd");
   if (process.env.WASM_OPT_CONVERGE === "1") args.push("--converge");
   console.log(`Optimizing WASM with ${optimizer} ${level} ...`);
   const result = spawnSync(optimizer, args, { stdio: "inherit" });

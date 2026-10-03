@@ -284,6 +284,16 @@ impl Mixer {
                 let num_freqs = note_event.num_freqs;
                 let can_vectorize =
                     note_event.fm_params.mod_index == 0.0 && note_event.custom_wavetable.is_none();
+                if can_vectorize && num_freqs == 1 && note_event.pitch_bend_semitones == 0.0 {
+                    render_simple_note(
+                        note_event,
+                        &mut buffer[first..last],
+                        start_time,
+                        first,
+                        time_delta,
+                    );
+                    continue;
+                }
                 for (offset, sample_out) in buffer[first..last].iter_mut().enumerate() {
                     let time = start_time + (first + offset) as f32 * time_delta;
                     let time_in_note = time - note_event.start_time;
@@ -626,6 +636,19 @@ impl Mixer {
     }
 }
 
+// Preserve the original per-sample clock arithmetic (no accumulating oscillator
+// phase drift), but select the wavetable once and let it wrap phase only once.
+fn render_simple_note(note: &NoteEvent, output: &mut [f32], start: f32, first: usize, step: f32) {
+    let table = note.waveform.table();
+    let frequency = note.frequencies[0];
+    for (offset, sample) in output.iter_mut().enumerate() {
+        let time = start + (first + offset) as f32 * step;
+        let time_in_note = time - note.start_time;
+        *sample += table.sample(time_in_note * frequency)
+            * note.envelope.amplitude_at(time_in_note, note.duration);
+    }
+}
+
 fn frame_at_or_after(time: f32, block_start: f32, step: f32, frames: usize) -> usize {
     let (mut low, mut high) = (0, frames);
     while low < high {
@@ -674,6 +697,33 @@ mod block_preparation_tests {
                     "block {block}, frame {i}: {} != {expected}",
                     value * pan_gain
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn simple_note_fast_path_preserves_waveforms_and_envelope_boundaries() {
+        use crate::synthesis::envelope::EnvelopeCurve;
+        for waveform in [
+            Waveform::Sine,
+            Waveform::Square,
+            Waveform::Sawtooth,
+            Waveform::Triangle,
+        ] {
+            for curve in [
+                EnvelopeCurve::Linear,
+                EnvelopeCurve::Exponential,
+                EnvelopeCurve::Logarithmic,
+            ] {
+                let mut track = Track::new();
+                track.add_note_with_waveform_and_envelope(
+                    &[233.08188],
+                    0.013,
+                    0.08,
+                    waveform,
+                    Envelope::with_curve(0.005, 0.02, 0.6, 0.05, curve),
+                );
+                compare_to_scalar(track);
             }
         }
     }

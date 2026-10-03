@@ -40,8 +40,9 @@ unrelated files. Use `dev` instead of `release` to skip wasm-opt.
 
 Rust and wasm-opt default to speed-oriented optimization (`3` / `-O3`), even if
 that increases download size. `WASM_OPT` selects a Binaryen executable;
-`WASM_OPT_LEVEL` accepts `-O2`, `-O3`, `-Os`, or `-Oz`. `WASM_SIMD=1` explicitly
-opts into SIMD and requires a compatible browser. Do not infer SIMD support from
+`WASM_OPT_LEVEL` accepts `-O2`, `-O3`, `-Os`, or `-Oz`. SIMD is enabled by
+default and requires a compatible browser (Safari/iOS 16.4+). Set `WASM_SIMD=0`
+to build without enabling SIMD. Do not infer SIMD support from
 the library's internal lane dispatcher. Measure performance on your devices.
 
 ## Start from a user gesture
@@ -97,8 +98,9 @@ volume/pan/rate automation, fades, pause/resume and stop. Spectral/convolution
 effects and native file streams are explicitly unsupported. The private JSON
 wire format is not a general RPC API; version and package both modules together.
 
-DSP output uses four transferable 512-frame stereo blocks (about 46 ms buffered
-at 44.1 kHz, plus device latency). Buffer size is fixed. Commands are bounded and
+DSP output defaults to four transferable 512-frame stereo blocks (about 46 ms buffered
+at 44.1 kHz, plus device latency). Call `setBlockFrames(512 | 1024 | 2048 | 4096 | 8192)` to resize the DSP block
+without resetting voices. Queued packets retain their original lengths. Commands are bounded and
 coalesced with reserved release capacity and an emergency stop under overload.
 The renderer admits 96 voices with eight additional stealing fades. The game PCM
 cache is bounded at 128 allocations / 128 MiB; registration/admission may fail and
@@ -125,3 +127,30 @@ not work. For a desktop-only local check, you can run
 sample loading, overload and user-gesture recovery. Monitor underruns and command
 rejections. The harness has passed an iPhone stall/resume check; this is not a
 cross-browser compatibility certification.
+
+`installWorkerAudio({ bufferBlocks: 24 })` selects a larger fixed pool to tolerate
+longer buffer-delivery gaps. Valid counts are 4–32; default is 4. At 48 kHz,
+24 blocks hold 256 ms of audio versus 42.7 ms for four. This also increases
+instrument response latency. It is a scheduling-tolerance tradeoff, not a DSP
+speed improvement. Enable `diagnostics: true` to compare interval underruns.
+
+Enable `adaptiveBuffering: true` to adjust the pool between 4 and 32 blocks
+without recreating the engine. `bufferBlocks` becomes the initial target. The
+controller grows after underruns. `bufferingPolicy` selects `conservative`
+(one block down after 60 clean seconds), `balanced` (two after 30, default), or
+`optimistic` (two after 10). Call `setBufferingPolicy()` to change this live;
+`bufferStatus()` reports the current target and mode. Startup/resume/adjustments have a three-second observation grace
+period; background playback is excluded. Buffers are preallocated, and downsizing
+parks them only after consumption, preserving queued PCM. Changes are logged as
+`[tunes] Audio buffering`. This observes playback conditions, not the device's
+power-saving setting directly. Persistent stalls beyond the maximum capacity can
+still cause underruns. Adaptive buffering is disabled by default in the library.
+
+Variable-size blocks require rebuilding the DSP WASM and publishing it with the
+matching worker scripts. `bufferStatus().blockFrames` is updated when the worker
+acknowledges a size change; mixed old/new packets can remain queued briefly.
+Adaptive mode limits the target to roughly 350 ms, subject to its four-block
+minimum and 32-block maximum. The 8192-frame preset therefore has a minimum
+capacity of about 683 ms at 48 kHz. Fixed-count mode keeps the chosen count.
+Changing block sizes can allocate on the DSP worker as consumed buffers are resized;
+the AudioWorklet does not allocate PCM storage during the transition.

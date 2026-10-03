@@ -1,4 +1,6 @@
-use crate::synthesis::wavetable::{SAWTOOTH_WAVETABLE, SQUARE_WAVETABLE, TRIANGLE_WAVETABLE, WAVETABLE};
+use crate::synthesis::wavetable::{
+    SAWTOOTH_WAVETABLE, SQUARE_WAVETABLE, TRIANGLE_WAVETABLE, WAVETABLE,
+};
 
 /// Different waveform types for synthesis
 ///
@@ -14,6 +16,17 @@ pub enum Waveform {
 }
 
 impl Waveform {
+    /// Resolve the immutable built-in table once for block synthesis.
+    #[inline]
+    pub(crate) fn table(&self) -> &'static crate::synthesis::wavetable::Wavetable {
+        match self {
+            Self::Sine => &WAVETABLE,
+            Self::Square => &SQUARE_WAVETABLE,
+            Self::Sawtooth => &SAWTOOTH_WAVETABLE,
+            Self::Triangle => &TRIANGLE_WAVETABLE,
+        }
+    }
+
     /// Generate a sample for this waveform at a given phase (0.0 to 1.0)
     ///
     /// All waveforms use pre-computed band-limited wavetables for high-quality,

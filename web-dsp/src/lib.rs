@@ -18,6 +18,7 @@ pub struct DspWorker {
     sample_bytes: usize,
     output: Vec<f32>,
     rate: f32,
+    frames: usize,
 }
 #[wasm_bindgen]
 impl DspWorker {
@@ -34,6 +35,7 @@ impl DspWorker {
             sample_bytes: 0,
             output: vec![0.0; FRAMES * 2],
             rate,
+            frames: FRAMES,
         })
     }
     pub fn protocol_version(&self) -> u32 {
@@ -66,7 +68,7 @@ impl DspWorker {
         self.renderer.playing_ids()
     }
     pub fn reset(&mut self) {
-        self.renderer = AudioRenderer::new(self.rate, FRAMES);
+        self.renderer = AudioRenderer::new(self.rate, self.frames);
         self.pcm.clear();
         self.pcm_bytes = 0;
         self.samples.clear();
@@ -167,6 +169,29 @@ impl DspWorker {
     pub fn stop_all(&self) -> bool {
         self.renderer.stop_all()
     }
+    /// Change the block size between render jobs, preserving active voices.
+    pub fn set_block_frames(&mut self, frames: usize) -> Result<(), JsValue> {
+        if !matches!(frames, 512 | 1024 | 2048 | 4096 | 8192) {
+            return Err(JsValue::from_str("invalid DSP block size"));
+        }
+        self.renderer.set_block_frames(frames);
+        self.output.resize(frames * 2, 0.0);
+        self.frames = frames;
+        Ok(())
+    }
+    pub fn block_frames(&self) -> usize {
+        self.frames
+    }
+
+    /// Render into the persistent variable-size stereo output buffer. The returned
+    /// byte address belongs to this instance, not the caller. JavaScript must
+    /// refresh its view after WASM memory growth and copy before transferring it.
+    /// `render()` remains available when an independently owned copy is needed.
+    pub fn render_buffer(&mut self) -> usize {
+        self.renderer.render(&mut self.output);
+        self.output.as_ptr() as usize
+    }
+
     pub fn render(&mut self) -> Vec<f32> {
         self.renderer.render(&mut self.output);
         self.output.clone()

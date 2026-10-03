@@ -1,9 +1,16 @@
 // DSP lives in a dedicated Rust/WASM worker. This node only consumes PCM.
 class TunesOutput extends AudioWorkletProcessor {
-  constructor() {
+  constructor(options) {
     super();
     this.session = 0;
-    this.blocks = new Array(4).fill(null);
+    const bufferBlocks = options?.processorOptions?.bufferBlocks ?? 4;
+    if (
+      !Number.isInteger(bufferBlocks) ||
+      bufferBlocks < 4 ||
+      bufferBlocks > 32
+    )
+      throw new Error("Invalid audio buffer count");
+    this.blocks = new Array(bufferBlocks).fill(null);
     this.read = 0;
     this.count = 0;
     this.offset = 0;
@@ -17,7 +24,7 @@ class TunesOutput extends AudioWorkletProcessor {
         while (this.count) {
           const packet = this.blocks[this.read];
           this.blocks[this.read] = null;
-          this.read = (this.read + 1) % 4;
+          this.read = (this.read + 1) % this.blocks.length;
           this.count--;
           packet.type = "recycle";
           this.audioPort.postMessage(packet, [packet.samples.buffer]);
@@ -35,14 +42,14 @@ class TunesOutput extends AudioWorkletProcessor {
         if (
           packet.type !== "pcm" ||
           !(packet.samples instanceof Float32Array) ||
-          packet.samples.length !== 1024
+          ![1024, 2048, 4096, 8192, 16384].includes(packet.samples.length)
         )
           return;
         if (
           (packet.session ?? 0) !== this.session ||
           this.count === this.blocks.length
         ) {
-          // The producer owns exactly four transferable blocks, so overflow
+          // The producer owns a fixed number of transferable blocks, so overflow
           // indicates a protocol error. Return the buffer instead of growing.
           packet.type = "recycle";
           this.audioPort.postMessage(packet, [packet.samples.buffer]);
@@ -68,7 +75,7 @@ class TunesOutput extends AudioWorkletProcessor {
       if (channels.length > 1)
         channels[1][frame] = packet.samples[this.offset * 2 + 1];
       this.offset++;
-      if (this.offset === 512) {
+      if (this.offset === packet.samples.length / 2) {
         this.blocks[this.read] = null;
         this.read = (this.read + 1) % this.blocks.length;
         this.count--;

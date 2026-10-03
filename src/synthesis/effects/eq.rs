@@ -3,6 +3,7 @@ use crate::track::PRIORITY_EARLY;
 
 /// Parametric EQ - 3-band equalizer
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 pub struct EQ {
     pub low_gain: f32,  // Low frequency gain (0.0 to 2.0, 1.0 = unity)
     pub mid_gain: f32,  // Mid frequency gain (0.0 to 2.0, 1.0 = unity)
@@ -194,6 +195,7 @@ impl EQ {
 ///
 /// Allows boosting or cutting a specific frequency range with adjustable bandwidth.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 pub struct EQBand {
     /// Center frequency in Hz
     pub frequency: f32,
@@ -334,6 +336,7 @@ impl EQBand {
 ///     .band(8000.0, -2.0, 1.5);  // Tame harshness
 /// ```
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 pub struct ParametricEQ {
     /// EQ bands
     pub bands: Vec<EQBand>,
@@ -475,6 +478,7 @@ impl Default for ParametricEQ {
 
 /// EQ presets for common scenarios
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 pub enum EQPreset {
     /// Vocal clarity - cut rumble/mud, boost presence
     VocalClarity,

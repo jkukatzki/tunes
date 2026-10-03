@@ -340,7 +340,7 @@ mod tests {
 
         assert_eq!(phases.len(), 3);
         for phase in phases {
-            assert_eq!(phase, vec![]);
+            assert_eq!(phase, Vec::<usize>::new());
         }
     }
 
@@ -351,7 +351,7 @@ mod tests {
 
         assert_eq!(phases.len(), 2);
         for phase in phases {
-            assert_eq!(phase, vec![]);
+            assert_eq!(phase, Vec::<usize>::new());
         }
     }
 

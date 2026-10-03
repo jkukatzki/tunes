@@ -156,7 +156,7 @@ impl TempoMap {
 /// Convert DrumType to General MIDI percussion note number
 ///
 /// General MIDI defines percussion on channel 10 with specific note numbers.
-/// See: https://en.wikipedia.org/wiki/General_MIDI#Percussion
+/// See: <https://en.wikipedia.org/wiki/General_MIDI#Percussion>
 pub fn drum_type_to_midi_note(drum_type: DrumType) -> u8 {
     match drum_type {
         // Kick drums

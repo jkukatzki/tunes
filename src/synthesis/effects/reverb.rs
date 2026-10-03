@@ -6,6 +6,7 @@ const DEFAULT_SAMPLE_RATE: f32 = 44100.0;
 
 /// Simple reverb using multiple comb filters
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 pub struct Reverb {
     pub room_size: f32, // Room size (0.0 to 1.0)
     pub damping: f32,   // High frequency damping (0.0 to 1.0)

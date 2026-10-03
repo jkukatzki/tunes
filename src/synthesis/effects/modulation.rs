@@ -5,6 +5,7 @@ use crate::track::PRIORITY_MODULATION;
 const DEFAULT_SAMPLE_RATE: f32 = 44100.0;
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 struct AllPassFilter {
     z1: f32,
 }
@@ -24,6 +25,7 @@ impl AllPassFilter {
 
 /// Chorus - creates thickness by layering detuned copies
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 pub struct Chorus {
     pub rate: f32,    // LFO rate in Hz (typical: 0.5 to 3.0)
     pub depth: f32,   // Modulation depth in milliseconds (typical: 2.0 to 10.0)
@@ -258,6 +260,7 @@ impl Chorus {
 
 /// Phaser - creates sweeping notches in the frequency spectrum
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 pub struct Phaser {
     pub rate: f32,     // LFO rate in Hz (typical: 0.1 to 5.0)
     pub depth: f32,    // Modulation depth (0.0 to 1.0)
@@ -518,6 +521,7 @@ impl Phaser {
 
 /// Flanger - creates jet-plane/swoosh effects with very short delays
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 pub struct Flanger {
     pub rate: f32,     // LFO rate in Hz (typical: 0.1 to 2.0)
     pub depth: f32,    // Modulation depth in milliseconds (typical: 1.0 to 5.0)
@@ -780,6 +784,7 @@ impl Flanger {
 
 /// Ring Modulator - creates metallic/robotic inharmonic tones
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 pub struct RingModulator {
     pub carrier_freq: f32, // Carrier frequency in Hz (typical: 50 to 5000)
     pub mix: f32,          // Wet/dry mix (0.0 = dry, 1.0 = wet)
@@ -991,6 +996,7 @@ impl RingModulator {
 /// Lower frequency rates (< 10 Hz) create a pulsing effect, while higher rates
 /// can create vibrato-like timbral changes.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 pub struct Tremolo {
     pub rate: f32,    // LFO rate in Hz (typically 1-20 Hz)
     pub depth: f32,   // Modulation depth 0.0 to 1.0

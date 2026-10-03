@@ -8,6 +8,8 @@ use crate::track::Mixer;
 
 /// State for an actively playing sound
 pub(crate) struct ActiveSound {
+    pub options: super::voice_budget::VoiceOptions,
+    pub stolen: bool,
     pub source: super::source::SoundSource,
     pub bus: Option<u64>,
     pub duration: f32,
@@ -64,6 +66,8 @@ impl ActiveSound {
     ) -> Self {
         let duration = source.duration(looping);
         Self {
+            options: Default::default(),
+            stolen: false,
             source,
             bus,
             duration,

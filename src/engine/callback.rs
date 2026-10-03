@@ -9,16 +9,8 @@ use super::sound_pool::SoundPool;
 use super::streaming::StreamingSound;
 use crate::synthesis::simd::{SimdWidth, SIMD};
 use crate::synthesis::spatial::{calculate_spatial_with_cone, ListenerConfig, SpatialParams, Vec3};
-use crossbeam::epoch::{self, Atomic, Owned};
-use dashmap::DashMap;
 #[cfg(not(target_arch = "wasm32"))]
-use ringbuf::{traits::Split, HeapRb};
-#[cfg(not(target_arch = "wasm32"))]
-use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
-#[cfg(not(target_arch = "wasm32"))]
-use std::thread;
 use wide::f32x8;
 
 /// Audio callback state with reusable mixing buffers
@@ -27,6 +19,8 @@ use wide::f32x8;
 /// All buffers are reused across callback invocations.
 pub(crate) struct AudioCallbackState {
     /// Active sounds packed together, independent of monotonically increasing SoundIds
+    pub listener: ListenerConfig,
+    pub spatial: SpatialParams,
     pub active_sounds: SoundPool<ActiveSound>,
     pub effect_buses: SoundPool<super::effect_bus::EffectBusState>,
     /// Streaming sounds (separate from pre-rendered sounds, native only)
@@ -45,14 +39,16 @@ pub(crate) struct AudioCallbackState {
 impl AudioCallbackState {
     pub fn new() -> Self {
         Self {
+            listener: ListenerConfig::default(),
+            spatial: SpatialParams::default(),
             // Pre-allocate space for 128 concurrent sounds (typical max for games)
             active_sounds: SoundPool::with_capacity(128),
-            effect_buses: SoundPool::with_capacity(8),
+            effect_buses: SoundPool::with_capacity(16),
             #[cfg(not(target_arch = "wasm32"))]
             streaming_sounds: SoundPool::with_capacity(16),
             // Pre-allocate for a reasonably large buffer (2048 frames stereo = 4096 samples)
-            temp_buffer: vec![0.0; 4096],
-            finished_sounds: Vec::with_capacity(16),
+            temp_buffer: vec![0.0; 4096 * 16],
+            finished_sounds: Vec::with_capacity(128),
             #[cfg(not(target_arch = "wasm32"))]
             finished_streams: Vec::with_capacity(16),
         }
@@ -73,20 +69,41 @@ pub(crate) fn handle_command(
     effect_buses: &mut SoundPool<super::effect_bus::EffectBusState>,
     active_sounds: &mut SoundPool<ActiveSound>,
     #[cfg(not(target_arch = "wasm32"))] streaming_sounds: &mut SoundPool<StreamingSound>,
-    listener_atomic: &Arc<Atomic<ListenerConfig>>,
-    spatial_atomic: &Arc<Atomic<SpatialParams>>,
+    listener: &mut ListenerConfig,
+    spatial: &mut SpatialParams,
     _sample_rate: f32,
-    playing_states: &DashMap<SoundId, ()>,
+    playing_states: &super::playing_states::PlayingStates,
 ) {
+    #[cfg(not(target_arch = "wasm32"))]
+    let stream_count = streaming_sounds.len();
+    #[cfg(target_arch = "wasm32")]
+    let stream_count = 0;
     match cmd {
-        AudioCommand::PlaySource { id, source, bus } => {
+        AudioCommand::PlaySource {
+            id,
+            source,
+            bus,
+            options,
+        } => {
+            if !super::voice_budget::admit(active_sounds, options, stream_count) {
+                let sound = ActiveSound::from_source(*source, false, bus);
+                assert!(active_sounds.retired.push(sound).is_ok());
+                playing_states.remove(&id);
+                return;
+            }
             if let Some(route) = bus.and_then(|id| effect_buses.get_mut(id)) {
                 route.paused = false;
             }
-            active_sounds.insert(id, ActiveSound::from_source(*source, false, bus));
+            let mut sound = ActiveSound::from_source(*source, false, bus);
+            sound.options = options;
+            active_sounds.insert(id, sound);
         }
         AudioCommand::SetEffectBus { id, bus } => {
-            effect_buses.insert(id, *bus);
+            if effect_buses.get_mut(id).is_some() || effect_buses.len() < 16 {
+                effect_buses.insert(id, *bus);
+            } else {
+                assert!(effect_buses.retired.push(*bus).is_ok());
+            }
         }
         AudioCommand::RemoveEffectBus { id } => {
             effect_buses.remove(id);
@@ -97,11 +114,22 @@ pub(crate) fn handle_command(
             }
         }
 
-        AudioCommand::Play { id, mixer, looping } => {
-            active_sounds.insert(
-                id,
-                ActiveSound::from_source(super::source::SoundSource::Mixer(mixer), looping, None),
-            );
+        AudioCommand::Play {
+            id,
+            mixer,
+            looping,
+            options,
+        } => {
+            let accepted = super::voice_budget::admit(active_sounds, options, stream_count);
+            let mut sound =
+                ActiveSound::from_source(super::source::SoundSource::Mixer(mixer), looping, None);
+            sound.options = options;
+            if accepted {
+                active_sounds.insert(id, sound);
+            } else {
+                assert!(active_sounds.retired.push(sound).is_ok());
+                playing_states.remove(&id);
+            }
         }
         AudioCommand::Stop { id } => {
             active_sounds.remove(id);
@@ -143,53 +171,33 @@ pub(crate) fn handle_command(
             if let Some(sound) = active_sounds.get_mut(id) {
                 if let Some(pos) = &mut sound.spatial_position {
                     pos.set_velocity(vx, vy, vz);
+                    sound.spatial_dirty = true;
                 }
             }
         }
         AudioCommand::SetListenerPosition { x, y, z } => {
-            // Lock-free update: load, clone, modify, store
-            let guard = epoch::pin();
-            let current = unsafe {
-                listener_atomic
-                    .load(Ordering::Acquire, &guard)
-                    .as_ref()
-                    .unwrap()
-            };
-            let mut new_config = *current;
-            new_config.position.x = x;
-            new_config.position.y = y;
-            new_config.position.z = z;
-            listener_atomic.store(Owned::new(new_config), Ordering::Release);
+            listener.position = Vec3::new(x, y, z);
+            for (_, sound) in active_sounds.iter_mut() {
+                sound.spatial_dirty = true;
+            }
         }
         AudioCommand::SetListenerVelocity { vx, vy, vz } => {
-            let guard = epoch::pin();
-            let current = unsafe {
-                listener_atomic
-                    .load(Ordering::Acquire, &guard)
-                    .as_ref()
-                    .unwrap()
-            };
-            let mut new_config = *current;
-            new_config.velocity.x = vx;
-            new_config.velocity.y = vy;
-            new_config.velocity.z = vz;
-            listener_atomic.store(Owned::new(new_config), Ordering::Release);
+            listener.velocity = Vec3::new(vx, vy, vz);
+            for (_, sound) in active_sounds.iter_mut() {
+                sound.spatial_dirty = true;
+            }
         }
         AudioCommand::SetListenerForward { x, y, z } => {
-            let guard = epoch::pin();
-            let current = unsafe {
-                listener_atomic
-                    .load(Ordering::Acquire, &guard)
-                    .as_ref()
-                    .unwrap()
-            };
-            let mut new_config = *current;
-            new_config.forward = Vec3::new(x, y, z).normalize();
-            listener_atomic.store(Owned::new(new_config), Ordering::Release);
+            listener.forward = Vec3::new(x, y, z).normalize();
+            for (_, sound) in active_sounds.iter_mut() {
+                sound.spatial_dirty = true;
+            }
         }
         AudioCommand::SetSpatialParams { params } => {
-            // Direct replacement - just store the new params
-            spatial_atomic.store(Owned::new(params), Ordering::Release);
+            *spatial = params;
+            for (_, sound) in active_sounds.iter_mut() {
+                sound.spatial_dirty = true;
+            }
         }
         AudioCommand::SetSoundCone { id, cone } => {
             if let Some(sound) = active_sounds.get_mut(id) {
@@ -223,8 +231,12 @@ pub(crate) fn handle_command(
             for (_, bus) in effect_buses.iter_mut() {
                 bus.reset();
             }
+            for (id, _) in active_sounds.iter_mut() {
+                playing_states.remove(id);
+            }
             active_sounds.clear();
-            playing_states.clear();
+            #[cfg(not(target_arch = "wasm32"))]
+            streaming_sounds.clear();
         }
         AudioCommand::FadeOut { id, duration } => {
             if let Some(sound) = active_sounds.get_mut(id) {
@@ -266,47 +278,14 @@ pub(crate) fn handle_command(
         }
         // Streaming commands (native only)
         #[cfg(not(target_arch = "wasm32"))]
-        AudioCommand::StreamFile {
-            id,
-            path,
-            looping,
-            volume,
-            pan,
-        } => {
-            // Create ring buffer (5 seconds of stereo audio at 44.1kHz = ~441000 samples)
-            let ring_buffer_size = (_sample_rate * 5.0 * 2.0) as usize;
-            let ring_buffer = HeapRb::<f32>::new(ring_buffer_size);
-            let (ring_producer, ring_consumer) = ring_buffer.split();
-
-            // Create control signals
-            let stop_signal = Arc::new(AtomicBool::new(false));
-            let pause_signal = Arc::new(AtomicBool::new(false));
-
-            // Spawn decoder thread
-            let stop_signal_clone = Arc::clone(&stop_signal);
-            let pause_signal_clone = Arc::clone(&pause_signal);
-            let decoder_thread = thread::spawn(move || {
-                super::streaming::decoder_thread_func(
-                    path,
-                    ring_producer,
-                    stop_signal_clone,
-                    pause_signal_clone,
-                    looping,
-                );
-            });
-
-            streaming_sounds.insert(
-                id,
-                StreamingSound {
-                    ring_consumer,
-                    decoder_thread: Some(decoder_thread),
-                    stop_signal,
-                    pause_signal,
-                    volume,
-                    pan,
-                    looping,
-                },
-            );
+        AudioCommand::StreamFile { id, stream } => {
+            if streaming_sounds.len() < 16
+                && active_sounds.len() + streaming_sounds.len() < super::voice_budget::MAX_VOICES
+            {
+                streaming_sounds.insert(id, *stream);
+            } else {
+                assert!(streaming_sounds.retired.push(*stream).is_ok());
+            }
         }
         #[cfg(not(target_arch = "wasm32"))]
         AudioCommand::StopStream { id } => {
@@ -465,7 +444,7 @@ pub(crate) fn mix_sounds(
         spatial_volume *= 1.0 - spatial_occlusion;
 
         // Apply doppler pitch shift to playback rate
-        let effective_playback_rate = sound.playback_rate * spatial_pitch;
+        let effective_playback_rate = (sound.playback_rate * spatial_pitch).clamp(0.1, 16.0);
         let base_block_duration = num_frames as f32 * time_delta;
 
         // Compute source frames needed for resampling.
@@ -491,6 +470,20 @@ pub(crate) fn mix_sounds(
         } else {
             (Some(listener), Some(spatial_params)) // Use composition-time position
         };
+
+        // Only dry direct samples can be virtualized safely. Stateful synth
+        // filters and effect tails must still advance through their DSP.
+        if spatial_volume.abs() * sound.volume_at(sound.control_time).abs() < 0.00001
+            && matches!(sound.source, super::source::SoundSource::Sample(_))
+            && sound.bus.is_none()
+        {
+            sound.control_time += num_frames as f64 / sample_rate as f64;
+            sound.elapsed_time += base_block_duration * effective_playback_rate;
+            if sound.update_fade() {
+                finished_sounds.push(*id);
+            }
+            continue;
+        }
 
         // Render source_frames of source material into temp_buffer
         sound.source.process_block(

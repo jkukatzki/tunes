@@ -44,6 +44,28 @@ pub(crate) struct StreamingSound {
     pub looping: bool,
 }
 
+impl StreamingSound {
+    pub fn prepare(path: PathBuf, looping: bool, sample_rate: f32) -> Self {
+        use ringbuf::{traits::Split, HeapRb};
+        let (producer, consumer) = HeapRb::<f32>::new((sample_rate * 5.0 * 2.0) as usize).split();
+        let stop_signal = Arc::new(AtomicBool::new(false));
+        let pause_signal = Arc::new(AtomicBool::new(false));
+        let stop = stop_signal.clone();
+        let pause = pause_signal.clone();
+        let decoder_thread =
+            thread::spawn(move || decoder_thread_func(path, producer, stop, pause, looping));
+        Self {
+            ring_consumer: consumer,
+            decoder_thread: Some(decoder_thread),
+            stop_signal,
+            pause_signal,
+            volume: 1.0,
+            pan: 0.0,
+            looping,
+        }
+    }
+}
+
 impl Drop for StreamingSound {
     fn drop(&mut self) {
         // Signal thread to stop and wait for it to finish

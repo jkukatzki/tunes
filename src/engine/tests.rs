@@ -6,9 +6,6 @@ use super::commands::AudioCommand;
 use crate::composition::{Composition, Tempo};
 use crate::synthesis::spatial::{ListenerConfig, SpatialParams};
 use crate::synthesis::Sample;
-use crossbeam::epoch::Atomic;
-use dashmap::DashMap;
-use std::sync::Arc;
 
 const RATE: f32 = 1024.0;
 
@@ -144,6 +141,7 @@ fn shared_bus_keeps_tails_after_voice_end_and_obeys_global_controls() {
     let sample = Sample::from_mono(vec![0.5; 16], RATE as u32);
     for id in [2, 3] {
         callback.command(AudioCommand::PlaySource {
+            options: Default::default(),
             id,
             source: Box::new(SoundSource::sample(sample.clone(), 1.0, 1.0, 0.0)),
             bus: Some(20),
@@ -191,6 +189,7 @@ fn direct_voice_keeps_fade_pause_and_playback_rate_controls() {
     let mut callback = Callback::new(false);
     callback.command(AudioCommand::StopAll);
     callback.command(AudioCommand::PlaySource {
+        options: Default::default(),
         id: 2,
         source: Box::new(SoundSource::sample(
             Sample::from_mono(vec![0.5; 4096], RATE as u32),
@@ -217,9 +216,7 @@ fn direct_voice_keeps_fade_pause_and_playback_rate_controls() {
 
 struct Callback {
     state: AudioCallbackState,
-    listener: Arc<Atomic<ListenerConfig>>,
-    spatial: Arc<Atomic<SpatialParams>>,
-    playing: DashMap<u64, ()>,
+    playing: super::playing_states::PlayingStates,
 }
 
 impl Callback {
@@ -235,9 +232,7 @@ impl Callback {
             .insert(1, ActiveSound::new(mixer, looping));
         Self {
             state,
-            listener: Arc::new(Atomic::new(ListenerConfig::default())),
-            spatial: Arc::new(Atomic::new(SpatialParams::default())),
-            playing: DashMap::new(),
+            playing: super::playing_states::PlayingStates::new(),
         }
     }
 
@@ -248,8 +243,8 @@ impl Callback {
             &mut self.state.active_sounds,
             #[cfg(not(target_arch = "wasm32"))]
             &mut self.state.streaming_sounds,
-            &self.listener,
-            &self.spatial,
+            &mut self.state.listener,
+            &mut self.state.spatial,
             RATE,
             &self.playing,
         );

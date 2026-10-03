@@ -247,9 +247,9 @@ mod tests {
 
     #[test]
     fn test_euclidean_edge_cases() {
-        assert_eq!(generate(0, 8), vec![]); // No pulses
-        assert_eq!(generate(8, 0), vec![]); // No steps
-        assert_eq!(generate(10, 8), vec![]); // More pulses than steps
+        assert_eq!(generate(0, 8), Vec::<usize>::new()); // No pulses
+        assert_eq!(generate(8, 0), Vec::<usize>::new()); // No steps
+        assert_eq!(generate(10, 8), Vec::<usize>::new()); // More pulses than steps
         assert_eq!(generate(8, 8), vec![0, 1, 2, 3, 4, 5, 6, 7]); // All steps
     }
 

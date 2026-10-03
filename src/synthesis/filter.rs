@@ -2,6 +2,7 @@ use std::f32::consts::PI;
 
 /// Types of filters available
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 pub enum FilterType {
     LowPass,
     HighPass,
@@ -14,6 +15,7 @@ pub enum FilterType {
 
 /// Filter slope/steepness options
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 pub enum FilterSlope {
     Pole12dB, // 12dB/octave - smoother, more musical
     Pole24dB, // 24dB/octave - steeper, more aggressive
@@ -22,6 +24,7 @@ pub enum FilterSlope {
 /// A simple state-variable filter implementation
 /// This is a 2-pole resonant filter with controllable cutoff and resonance
 #[derive(Clone, Copy)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 pub struct Filter {
     pub filter_type: FilterType,
     pub cutoff: f32,    // Cutoff frequency in Hz
@@ -62,6 +65,7 @@ pub struct Filter {
     last_resonance: f32,
 
     // Function pointer for branchless dispatch (set at construction)
+    #[cfg_attr(feature = "worker", serde(skip, default = "worker_filter_dispatch"))]
     process_fn: fn(&mut Filter, f32, f32) -> f32,
 }
 
@@ -672,4 +676,13 @@ mod tests {
             assert!(output.is_finite());
         }
     }
+}
+
+#[cfg(feature = "worker")]
+fn worker_filter_dispatch() -> fn(&mut Filter, f32, f32) -> f32 {
+    fn restore(filter:&mut Filter,input:f32,rate:f32)->f32 {
+        filter.process_fn = Filter::new(filter.filter_type, filter.cutoff, filter.resonance).process_fn;
+        (filter.process_fn)(filter,input,rate)
+    }
+    restore
 }

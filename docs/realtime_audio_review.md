@@ -113,3 +113,83 @@ remain. No game, audio device, or iOS simulator was opened; device CPU savings
 and audible behavior still need a listening comparison, especially chords,
 retriggers, and long reverb/delay releases. Shared buses currently continue
 processing silence to preserve tails rather than sleeping when inaudible.
+
+October 3 follow-up: overload handling and worker preparation
+
+The command queue now holds at most 384 entries, reserving the final 128 for
+release/stop/pause and bus retirement. Parameter updates coalesce on the producer
+only within a trailing run of parameter commands; fades, playback and pauses
+remain ordering barriers. The callback takes up to 64 commands with `try_lock`.
+If even the release reserve fills, pending attacks are canceled and an emergency
+global stop is scheduled instead of losing note-offs. A full ordinary queue
+returns an error. This bounds control processing, not arbitrary user DSP graphs.
+
+There are 96 normal voice slots and eight extra stealing fades of 5 ms. Priority
+protects important attacks from incidental sounds; candidates rank by priority,
+release state and estimated gain. Direct-source gain and cached spatial gain
+contribute to that estimate; this is not a measured psychoacoustic loudness model.
+Incidental samples allow four simultaneous instances per path. The game's local
+piano/nonspatial feedback are important, while spatial sample requests are
+incidental. Native streams count toward the same budget and have a separate
+maximum of 16. There are at most 16 engine effect-bus handles.
+
+Finished sources, replaced buses and finished streams enter fixed retirement
+queues. A native maintenance thread or browser timer destroys them outside the
+callback. If maintenance cannot keep up, output becomes silent until retirement
+capacity returns rather than allocating an unbounded cleanup backlog. Native
+stream buffers and decoder threads are prepared on the caller. Device buffers
+render in prepared-size chunks; the scratch reserve accommodates rates up to
+16x including Doppler. Dry direct samples with effectively zero output gain can
+advance without synthesis; stateful effect paths continue processing.
+
+Playback status now uses a fixed atomic registry. Listener/spatial configuration
+lives in callback state, so updates neither allocate nor leak old epoch snapshots.
+Listener changes invalidate spatial caches. Unconsumed track/bus RMS scans are
+skipped, with current sidechain dependencies refreshed each block.
+
+Remaining realtime limitations include user-supplied monitor callbacks, arbitrary
+composition complexity, DSP-internal buffer growth, effect-history resets and
+cache synchronization. The engine is not a hard realtime guarantee. These changes
+leave CPAL's browser renderer on the main thread for applications using
+`AudioEngine::with_buffer_size`; the game's worker route below replaces that path.
+
+`web-dsp` is now the game's browser output backend. It runs the same Rust DSP
+in a dedicated worker; its AudioWorklet consumes four transferable 512-frame
+stereo blocks. The launcher unlocks the context during Play, loads protocol v2,
+then starts Bevy. Native output continues to use CPAL. No shared memory or
+cross-origin isolation is required.
+
+Protocol v2 sends tracks, standard mixer graphs/effects, shared buses, spatial
+parameters and playback controls as owned JSON. Decoded PCM is uploaded separately
+once per allocation and cached by ID (128 entries / 128 MiB); channels and loop
+metadata accompany each sample reference. Spectral and convolution effects are
+not supported and produce explicit errors; current game audio does not use them.
+Messages use one in-flight batch of at most 64 commands, a bounded pending queue,
+parameter coalescing and reserved release/emergency-stop capacity. Engine resets
+change the session generation so stale PCM and playback status cannot affect the
+replacement engine. Monitor snapshots are optional, approximate visualisation
+updates every four blocks, not a lossless recording API.
+
+Visibility/pagehide suspend audio and release the playback session; foreground
+and input gestures retry resume. DSP state remains in the worker. A crashed worker
+is reported explicitly and requires reloading the page. Four buffered blocks add
+up to 46 ms at 44.1 kHz, plus hardware latency. Heavy graph decoding, first PCM
+uploads and arbitrary composition complexity can still cause worker starvation;
+this is not a hard realtime guarantee.
+
+`build:game` packages both WASM modules before publishing either. Audio assets are
+included in the release inventory and service-worker cache. Rebuild both modules
+and advance the release version before device testing/deployment. `build:audio`
+remains available for the isolated `/game/audio/index.html` harness.
+
+Validation: 1,619 library tests pass, including protocol render parity for filters,
+distortion, sample loops and mixer sidechains. Twelve browser transport/worklet and optimizer tests
+cover recycling, underruns, queue overload, session changes, pending playback
+status, PCM capacity and foreground gestures. The user confirmed the standalone
+harness survives a two-second main-thread stall and minimizing/reopening on iPhone.
+Integrated gameplay device validation remains outstanding; no game build or
+simulator was run by the agent. A disassembly
+of the existing packaged game artifact found zero SIMD instructions. The wrapper
+now provides instruction inspection and a repeatable size/speed/SIMD benchmark;
+`WASM_SIMD=1` explicitly opts builds into SIMD rather than inferring it from the
+dispatcher's lane label.

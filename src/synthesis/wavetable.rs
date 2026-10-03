@@ -30,6 +30,7 @@ pub const DEFAULT_TABLE_SIZE: usize = 2048;
 /// let saw = Wavetable::saw_bandlimited();
 /// ```
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 pub struct Wavetable {
     table: Arc<Vec<f32>>,
 }

@@ -165,7 +165,7 @@ pub mod prelude {
 
     // Core composition
     pub use crate::composition::{Composition, DrumGrid, DrumType, Tempo};
-    pub use crate::engine::{AudioEngine, BusEffects, EffectBus, SamplePlaybackBuilder, SoundId};
+    pub use crate::engine::{AudioEngine, BusEffects, EffectBus, VoicePriority, SamplePlaybackBuilder, SoundId};
     pub use crate::track::Mixer;
 
     // Error handling

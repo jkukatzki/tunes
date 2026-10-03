@@ -39,6 +39,7 @@ use hand_percussion::*;
 
 /// Drum types
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 pub enum DrumType {
     Kick,
     Kick808, // Long, pitched 808 kick

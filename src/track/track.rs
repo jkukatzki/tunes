@@ -92,6 +92,13 @@ impl Track {
         }
     }
 
+    #[cfg(feature = "worker")]
+    pub(crate) fn worker_invalidate_events(&mut self) {
+        self.events_sorted = false;
+        self.cached_start_time = None;
+        self.cached_end_time = None;
+    }
+
     pub(crate) fn prepare_realtime(&mut self, frames: usize) {
         self.prepare_voice(frames);
         self.scratch_buffer.resize(frames, 0.0);

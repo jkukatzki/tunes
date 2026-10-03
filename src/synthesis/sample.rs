@@ -46,6 +46,45 @@ pub struct Sample {
     loop_end: Option<usize>,
 }
 
+/// Private wire metadata; a public Sample must always contain its PCM.
+#[cfg(feature = "worker")]
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct WorkerSampleMetadata {
+    channels: u16,
+    sample_rate: u32,
+    duration: f32,
+    num_frames: usize,
+    loop_start: Option<usize>,
+    loop_end: Option<usize>,
+}
+#[cfg(feature = "worker")]
+impl From<&Sample> for WorkerSampleMetadata {
+    fn from(sample: &Sample) -> Self {
+        Self { channels: sample.channels, sample_rate: sample.sample_rate,
+            duration: sample.duration, num_frames: sample.num_frames,
+            loop_start: sample.loop_start, loop_end: sample.loop_end }
+    }
+}
+#[cfg(feature = "worker")]
+impl WorkerSampleMetadata {
+    pub(crate) fn with_pcm(self, data: Arc<Vec<f32>>) -> std::result::Result<Sample, String> {
+        if !(1..=2).contains(&self.channels) || self.sample_rate == 0
+            || data.len() % self.channels as usize != 0
+            || self.num_frames != data.len() / self.channels as usize
+            || !self.duration.is_finite() || self.duration < 0.0 {
+            return Err("invalid sample metadata or PCM length".into());
+        }
+        match (self.loop_start, self.loop_end) {
+            (None, None) => {},
+            (Some(start), Some(end)) if start < end && end <= self.num_frames => {},
+            _ => return Err("invalid sample loop bounds".into()),
+        }
+        Ok(Sample { data, channels: self.channels, sample_rate: self.sample_rate,
+            duration: self.duration, num_frames: self.num_frames,
+            loop_start: self.loop_start, loop_end: self.loop_end })
+    }
+}
+
 impl Sample {
     /// Load a sample from any supported audio file format
     ///

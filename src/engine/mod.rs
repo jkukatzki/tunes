@@ -7,8 +7,8 @@
 //! # Architecture
 //!
 //! The engine uses a command-based architecture where the main thread sends
-//! commands to the audio thread via a lock-free channel. This ensures the
-//! audio thread never blocks on the main thread.
+//! commands through a bounded queue. Producers coalesce updates; the callback
+//! takes a limited batch with try_lock and never waits for a producer.
 //!
 //! # Modules
 //!
@@ -23,10 +23,23 @@ mod effect_bus;
 mod source;
 pub use effect_bus::{BusEffects, EffectBus};
 mod callback;
+mod command_queue;
 mod commands;
+mod maintenance;
+mod renderer;
+#[cfg(feature = "worker")]
+mod worker_protocol;
+#[cfg(feature = "worker")]
+pub use worker_protocol::VERSION as WORKER_PROTOCOL_VERSION;
+#[cfg(all(feature = "worker", target_arch = "wasm32"))]
+mod worker_transport;
+pub use renderer::AudioRenderer;
 mod output_limiter;
+mod playing_states;
 mod sample_builder;
 mod sound_pool;
+mod voice_budget;
+pub use voice_budget::VoicePriority;
 #[cfg(not(target_arch = "wasm32"))]
 mod streaming;
 #[cfg(test)]
@@ -44,7 +57,7 @@ pub use sample_builder::SamplePlaybackBuilder;
 // Composition and Tempo are used for examples in doc comments
 use crate::error::{Result, TunesError};
 use crate::synthesis::simd::{SimdWidth, SIMD};
-use crate::synthesis::spatial::{ListenerConfig, SoundCone, SpatialParams, SpatialPosition};
+use crate::synthesis::spatial::{SoundCone, SpatialParams, SpatialPosition};
 use crate::synthesis::Sample;
 use crate::track::Mixer;
 use std::thread;
@@ -55,13 +68,12 @@ use callback::mix_streaming_sounds;
 use callback::{handle_command, mix_sounds, AudioCallbackState};
 use commands::AudioCommand;
 
+use command_queue::CommandSender;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use crossbeam::channel::{unbounded, Receiver, Sender};
-use crossbeam::epoch::{self, Atomic};
 use dashmap::DashMap;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Type alias for the inner monitor callback function
@@ -72,25 +84,23 @@ type MonitorCallback = Arc<Mutex<MonitorCallbackFn>>;
 
 /// Central audio engine that manages playback with concurrent mixing
 pub struct AudioEngine {
-    command_tx: Sender<AudioCommand>,
+    command_tx: CommandSender,
+    _maintenance: Option<maintenance::Maintenance>,
     next_id: Arc<AtomicU64>,
+    effect_bus_slots: Arc<AtomicUsize>,
     #[allow(dead_code)] // Kept alive so the callback's Arc<Mutex<...>> clone remains valid
     callback_state: Arc<Mutex<AudioCallbackState>>,
-    /// Lock-free set of currently playing sound IDs.
+    /// Fixed atomic registry of currently playing sound IDs.
     /// Updated by the audio callback and read by is_playing() without touching the mutex.
-    playing_states: Arc<DashMap<SoundId, ()>>,
-    #[allow(dead_code)] // Reserved for future spatial audio runtime control
-    listener_config: Arc<Atomic<ListenerConfig>>, // Lock-free reads via epoch-based reclamation
-    #[allow(dead_code)] // Reserved for future spatial audio runtime control
-    spatial_params: Arc<Atomic<SpatialParams>>, // Lock-free reads via epoch-based reclamation
+    playing_states: Arc<playing_states::PlayingStates>,
     sample_rate: f32,
     pub(crate) sample_cache: Arc<DashMap<String, crate::synthesis::Sample>>, // Lock-free sample caching
     // Remove browser listeners before dropping the stream/context.
     #[cfg(all(target_arch = "wasm32", feature = "web"))]
-    _web_audio: web_audio::WebAudioLifecycle,
-    _stream: cpal::Stream, // Persistent stream, kept alive
+    _web_audio: Option<web_audio::WebAudioLifecycle>,
+    _stream: Option<cpal::Stream>, // Persistent stream, kept alive
     #[cfg(all(target_arch = "wasm32", feature = "web"))]
-    output_factory: Box<dyn Fn() -> Result<cpal::Stream>>,
+    output_factory: Option<Box<dyn Fn() -> Result<cpal::Stream>>>,
     // Info for optional printing
     device_name: String,
     buffer_size: u32,
@@ -104,10 +114,13 @@ pub struct AudioEngine {
 
 impl AudioEngine {
     /// Suspend browser audio while the page is hidden and resume on return.
-    /// Defaults to false so applications can choose their background policy.
+    /// Applies to CPAL browser output and defaults to false. The dedicated worker
+    /// bridge always uses foreground-only playback; its host manages visibility.
     #[cfg(all(target_arch = "wasm32", feature = "web"))]
     pub fn set_pause_when_hidden(&self, enabled: bool) {
-        self._web_audio.set_pause_when_hidden(enabled);
+        if let Some(lifecycle) = &self._web_audio {
+            lifecycle.set_pause_when_hidden(enabled);
+        }
     }
 
     /// Reopen browser output once after a hidden-to-visible transition.
@@ -115,25 +128,72 @@ impl AudioEngine {
     /// Preserves voices, command queue, IDs, samples, listener and monitor state.
     #[cfg(all(target_arch = "wasm32", feature = "web"))]
     pub fn recover_web_output_on_foreground(&mut self) -> Result<bool> {
-        if !self._web_audio.take_foreground_return() {
+        #[cfg(feature = "worker")]
+        if let Some(session) = self.command_tx.4 {
+            if let Ok(guard) = self.monitor_callback.try_lock() {
+                if let Some(callback) = guard.as_ref() {
+                    let samples = worker_transport::monitor(session);
+                    if !samples.is_empty() {
+                        callback(&samples);
+                    }
+                }
+            }
+            return Ok(false);
+        }
+        if !self
+            ._web_audio
+            .as_ref()
+            .is_some_and(|lifecycle| lifecycle.take_foreground_return())
+        {
             return Ok(false);
         }
         // Prepare a suspended replacement before retiring the old stream.
-        let stream = (self.output_factory)()?;
+        let stream = (self.output_factory.as_ref().expect("CPAL output factory"))()?;
         let lifecycle = web_audio::WebAudioLifecycle::new(&stream)?;
         lifecycle.set_pause_when_hidden(true);
-        let cpal::platform::StreamInner::WebAudio(old) = self._stream.as_inner();
+        let cpal::platform::StreamInner::WebAudio(old) =
+            self._stream.as_ref().expect("CPAL stream").as_inner();
         let _ = old.audio_context().close();
         stream.play().map_err(|error| {
             TunesError::AudioEngineError(format!("Failed to restart browser audio output: {error}"))
         })?;
         // Remove old DOM listeners/watchdog before releasing the old stream.
-        self._web_audio = lifecycle;
-        self._stream = stream;
+        self._web_audio = Some(lifecycle);
+        self._stream = Some(stream);
         web_sys::console::info_1(
             &"[tunes] Recreated foreground audio output; engine state preserved".into(),
         );
         Ok(true)
+    }
+
+    /// Attach to the separate DSP worker prepared by the web launcher. No CPAL
+    /// stream or main-thread DSP callback is created. Fails if preparation failed.
+    #[cfg(all(feature = "worker", target_arch = "wasm32"))]
+    pub fn with_worker_output() -> Result<Self> {
+        let (session, sample_rate) =
+            worker_transport::attach().map_err(TunesError::AudioEngineError)?;
+        let playing_states = Arc::new(playing_states::PlayingStates::new());
+        web_sys::console::info_1(
+            &"[tunes] Dedicated DSP worker + AudioWorklet output active (protocol v2)".into(),
+        );
+        Ok(Self {
+            command_tx: CommandSender::for_worker(session, playing_states.clone()),
+            _maintenance: None,
+            next_id: Arc::new(AtomicU64::new(1)),
+            effect_bus_slots: Arc::new(AtomicUsize::new(0)),
+            callback_state: Arc::new(Mutex::new(AudioCallbackState::new())),
+            playing_states,
+            sample_rate,
+            sample_cache: Arc::new(DashMap::new()),
+            _web_audio: None,
+            _stream: None,
+            output_factory: None,
+            device_name: "Dedicated DSP worker + AudioWorklet".into(),
+            buffer_size: 512,
+            channels: 2,
+            enable_gpu_for_samples: false,
+            monitor_callback: Arc::new(Mutex::new(None)),
+        })
     }
 
     /// Sample rate of the active output stream in Hz.
@@ -143,9 +203,15 @@ impl AudioEngine {
 
     /// Create a persistent post-voice effect route. Its handle owns its lifetime.
     pub fn create_effect_bus(&self, effects: BusEffects) -> Result<EffectBus> {
+        self.effect_bus_slots
+            .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |count| {
+                (count < 16).then_some(count + 1)
+            })
+            .map_err(|_| TunesError::AudioEngineError("Maximum 16 effect buses reached".into()))?;
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let handle = EffectBus {
             id,
+            slots: self.effect_bus_slots.clone(),
             sender: self.command_tx.clone(),
             frames: self.buffer_size as usize,
         };
@@ -165,28 +231,71 @@ impl AudioEngine {
                 "Effect bus belongs to another engine".into(),
             ));
         }
+        self.play_track_with_priority(track, bus, VoicePriority::Normal)
+    }
+
+    /// Play a direct track with an explicit engine-wide admission priority.
+    pub fn play_track_with_priority(
+        &self,
+        track: crate::track::Track,
+        bus: Option<&EffectBus>,
+        priority: VoicePriority,
+    ) -> Result<SoundId> {
+        if bus.is_some_and(|bus| !bus.belongs_to(self)) {
+            return Err(TunesError::AudioEngineError(
+                "Effect bus belongs to another engine".into(),
+            ));
+        }
         self.play_source(
-            source::SoundSource::track(track, self.buffer_size as usize),
-            bus.map(|bus| bus.id),
+            source::SoundSource::track(track, self.buffer_size as usize * 16),
+            bus.map(|b| b.id),
+            voice_budget::VoiceOptions {
+                priority,
+                ..Default::default()
+            },
         )
     }
 
-    fn play_source(&self, source: source::SoundSource, bus: Option<u64>) -> Result<SoundId> {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        self.playing_states.insert(id, ());
+    fn play_source(
+        &self,
+        source: source::SoundSource,
+        bus: Option<u64>,
+        options: voice_budget::VoiceOptions,
+    ) -> Result<SoundId> {
+        let id = self.reserve_sound_id()?;
         if self
             .command_tx
             .send(AudioCommand::PlaySource {
                 id,
                 source: Box::new(source),
+                options,
                 bus,
             })
             .is_err()
         {
             self.playing_states.remove(&id);
-            return Err(TunesError::AudioEngineError("Audio engine stopped".into()));
+            return Err(TunesError::AudioEngineError(
+                "Audio command queue full or unavailable".into(),
+            ));
         }
         Ok(id)
+    }
+
+    fn reserve_sound_id(&self) -> Result<SoundId> {
+        #[cfg(all(feature = "worker", target_arch = "wasm32"))]
+        if self.command_tx.4.is_some() {
+            return Ok(self.next_id.fetch_add(1, Ordering::Relaxed));
+        }
+
+        for _ in 0..1024 {
+            let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+            if id != 0 && self.playing_states.insert(id, ()) {
+                return Ok(id);
+            }
+        }
+        Err(TunesError::AudioEngineError(
+            "Audio pending voice capacity reached".into(),
+        ))
     }
 
     /// Create a new audio engine with default output device
@@ -259,24 +368,22 @@ impl AudioEngine {
         let channels = config.channels() as usize;
         let device_name = device.name().unwrap_or_else(|_| "Unknown".to_string());
 
-        // Create command channel for communication with audio thread
-        let (command_tx, command_rx): (Sender<AudioCommand>, Receiver<AudioCommand>) = unbounded();
-
         // Shared state for audio callback (includes pre-allocated buffers)
         let callback_state: Arc<Mutex<AudioCallbackState>> =
             Arc::new(Mutex::new(AudioCallbackState::new()));
+        callback_state
+            .lock()
+            .unwrap()
+            .temp_buffer
+            .resize(buffer_size as usize * 32, 0.0);
+        let maintenance = maintenance::Maintenance::new(&callback_state.lock().unwrap());
         let callback_state_for_stream = Arc::clone(&callback_state);
 
-        // Lock-free playing state — decouples is_playing() from the callback mutex
-        let playing_states: Arc<DashMap<SoundId, ()>> = Arc::new(DashMap::new());
+        // Atomic playing state decouples is_playing() from the callback mutex
+        let playing_states = Arc::new(playing_states::PlayingStates::new());
         let playing_states_for_stream = Arc::clone(&playing_states);
-
-        // Lock-free shared state for spatial audio (epoch-based reclamation)
-        let listener_config = Arc::new(Atomic::new(ListenerConfig::new()));
-        let listener_config_for_stream = Arc::clone(&listener_config);
-
-        let spatial_params = Arc::new(Atomic::new(SpatialParams::default()));
-        let spatial_params_for_stream = Arc::clone(&spatial_params);
+        let command_tx = CommandSender::with_states(playing_states.clone());
+        let command_rx = command_tx.clone();
 
         // Monitor callback for audio visualization/analysis
         let monitor_callback: MonitorCallback = Arc::new(Mutex::new(None));
@@ -296,13 +403,12 @@ impl AudioEngine {
         let output_factory = move || {
             let callback_state_for_stream = callback_state_for_stream.clone();
             let playing_states_for_stream = playing_states_for_stream.clone();
-            let listener_config_for_stream = listener_config_for_stream.clone();
-            let spatial_params_for_stream = spatial_params_for_stream.clone();
             let monitor_callback_for_stream = monitor_callback_for_stream.clone();
             let command_rx = command_rx.clone();
             // Error handler
             let err_fn = |err| eprintln!("Audio stream error: {}", err);
 
+            let mut command_batch = Vec::with_capacity(command_queue::COMMANDS_PER_CALLBACK);
             let mut output_limiter = output_limiter::OutputLimiter::new();
             #[cfg(all(target_arch = "wasm32", feature = "web"))]
             let mut diagnostics = web_audio_diagnostics::CallbackDiagnostics::default();
@@ -316,10 +422,10 @@ impl AudioEngine {
                         let callback_started = web_audio_diagnostics::now_ms();
                         // Lock only AudioCallbackState (one lock instead of three!)
                         // If mutex is poisoned, output silence and return early
-                        let mut state = match callback_state_for_stream.lock() {
+                        let mut state = match callback_state_for_stream.try_lock() {
                             Ok(state) => state,
                             Err(e) => {
-                                eprintln!("Audio callback: mutex poisoned: {}", e);
+                                let _ = e;
                                 // Fill buffer with silence
                                 for sample in data.iter_mut() {
                                     *sample = 0.0;
@@ -328,28 +434,22 @@ impl AudioEngine {
                             }
                         };
 
-                        // Lock-free reads of spatial audio config via epoch-based reclamation
-                        let guard = epoch::pin();
-
-                        // Use defaults if atomic loads return null (graceful degradation)
-                        let default_listener = ListenerConfig::default();
-                        let listener = unsafe {
-                            listener_config_for_stream
-                                .load(Ordering::Acquire, &guard)
-                                .as_ref()
-                        };
-                        let listener = listener.unwrap_or(&default_listener);
-
-                        let default_spatial = SpatialParams::default();
-                        let spatial = unsafe {
-                            spatial_params_for_stream
-                                .load(Ordering::Acquire, &guard)
-                                .as_ref()
-                        };
-                        let spatial = spatial.unwrap_or(&default_spatial);
+                        if !state.active_sounds.retirement_available()
+                            || !state.effect_buses.retirement_available()
+                        {
+                            data.fill(0.0);
+                            return;
+                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if !state.streaming_sounds.retirement_available() {
+                            data.fill(0.0);
+                            return;
+                        }
 
                         // Destructure state FIRST to get separate mutable references (satisfies borrow checker)
                         let AudioCallbackState {
+                            ref mut listener,
+                            ref mut spatial,
                             ref mut active_sounds,
                             ref mut effect_buses,
                             #[cfg(not(target_arch = "wasm32"))]
@@ -360,53 +460,62 @@ impl AudioEngine {
                             ref mut finished_streams,
                         } = *state;
 
-                        // Process all pending commands (non-blocking)
-                        while let Ok(cmd) = command_rx.try_recv() {
+                        // Bounded FIFO batch; producer-side coalescing reduces
+                        // redundant updates without reordering attacks/releases.
+                        command_rx.take_batch(&mut command_batch);
+                        for cmd in command_batch.drain(..) {
                             handle_command(
                                 cmd,
                                 effect_buses,
                                 active_sounds,
                                 #[cfg(not(target_arch = "wasm32"))]
                                 streaming_sounds,
-                                &listener_config_for_stream,
-                                &spatial_params_for_stream,
+                                listener,
+                                spatial,
                                 sample_rate,
                                 &playing_states_for_stream,
                             );
                         }
 
-                        // Mix all active sounds into the output buffer (allocation-free)
-                        mix_sounds(
-                            data,
-                            effect_buses,
-                            active_sounds,
-                            temp_buffer,
-                            finished_sounds,
-                            listener,
-                            spatial,
-                            sample_rate,
-                            channels,
-                        );
+                        // Device callbacks can exceed the requested size. Render
+                        // in prepared-size chunks rather than growing scratch space.
+                        for data in data.chunks_mut(buffer_size.max(1) as usize * channels) {
+                            mix_sounds(
+                                data,
+                                effect_buses,
+                                active_sounds,
+                                temp_buffer,
+                                finished_sounds,
+                                listener,
+                                spatial,
+                                sample_rate,
+                                channels,
+                            );
 
-                        // Remove finished sounds from the lock-free playing_states map
-                        // so is_playing() stays accurate without touching this mutex
-                        for &id in finished_sounds.iter() {
-                            playing_states_for_stream.remove(&id);
-                        }
+                            // Remove finished sounds from the lock-free playing_states map
+                            // so is_playing() stays accurate without touching this mutex
+                            for &id in finished_sounds.iter() {
+                                playing_states_for_stream.remove(&id);
+                            }
 
-                        // Mix streaming sounds into the output buffer
-                        #[cfg(not(target_arch = "wasm32"))]
-                        mix_streaming_sounds(data, streaming_sounds, finished_streams, channels);
+                            // Mix streaming sounds into the output buffer
+                            #[cfg(not(target_arch = "wasm32"))]
+                            mix_streaming_sounds(
+                                data,
+                                streaming_sounds,
+                                finished_streams,
+                                channels,
+                            );
 
-                        output_limiter.process(data, channels, sample_rate);
+                            output_limiter.process(data, channels, sample_rate);
 
-                        // Visualization must never wait for UI-side callback registration.
-                        if let Ok(callback_guard) = monitor_callback_for_stream.try_lock() {
-                            if let Some(ref callback) = *callback_guard {
-                                callback(data);
+                            // Visualization must never wait for UI-side callback registration.
+                            if let Ok(callback_guard) = monitor_callback_for_stream.try_lock() {
+                                if let Some(ref callback) = *callback_guard {
+                                    callback(data);
+                                }
                             }
                         }
-
                         #[cfg(all(target_arch = "wasm32", feature = "web"))]
                         diagnostics.record(
                             callback_started,
@@ -414,8 +523,6 @@ impl AudioEngine {
                             data.len() / channels,
                             sample_rate,
                         );
-
-                        // Guard dropped here - safe to reclaim old epochs
                     },
                     err_fn,
                     None,
@@ -436,18 +543,18 @@ impl AudioEngine {
 
         Ok(Self {
             command_tx,
+            _maintenance: Some(maintenance),
             next_id: Arc::new(AtomicU64::new(1)),
+            effect_bus_slots: Arc::new(AtomicUsize::new(0)),
             callback_state,
             playing_states,
-            listener_config,
-            spatial_params,
             sample_rate,
             sample_cache: Arc::new(DashMap::new()),
             #[cfg(all(target_arch = "wasm32", feature = "web"))]
-            _web_audio: web_audio,
-            _stream: stream,
+            _web_audio: Some(web_audio),
+            _stream: Some(stream),
             #[cfg(all(target_arch = "wasm32", feature = "web"))]
-            output_factory: Box::new(output_factory),
+            output_factory: Some(Box::new(output_factory)),
             device_name,
             buffer_size,
             channels,
@@ -545,11 +652,11 @@ impl AudioEngine {
     /// # }
     /// ```
     pub fn play_mixer_realtime(&self, mixer: &Mixer) -> Result<SoundId> {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let id = self.reserve_sound_id()?;
 
         // Clone mixer and automatically enable GPU if engine was created with GPU support
         let mut mixer_clone = mixer.clone();
-        mixer_clone.prepare_realtime(self.buffer_size as usize);
+        mixer_clone.prepare_realtime(self.buffer_size as usize * 16);
 
         #[cfg(feature = "gpu")]
         if self.enable_gpu_for_samples {
@@ -557,15 +664,18 @@ impl AudioEngine {
         }
 
         // Register as playing before sending the command so is_playing() is accurate immediately
-        self.playing_states.insert(id, ());
 
         self.command_tx
             .send(AudioCommand::Play {
                 id,
                 mixer: Box::new(mixer_clone),
+                options: Default::default(),
                 looping: false,
             })
-            .map_err(|_| TunesError::AudioEngineError("Audio engine stopped".to_string()))?;
+            .map_err(|_| {
+                self.playing_states.remove(&id);
+                TunesError::AudioEngineError("Audio command queue full or unavailable".to_string())
+            })?;
         Ok(id)
     }
 
@@ -662,14 +772,13 @@ impl AudioEngine {
     /// # }
     /// ```
     pub fn play_looping(&self, mixer: &Mixer) -> Result<SoundId> {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let id = self.reserve_sound_id()?;
 
         // Register in playing_states so is_playing() returns true immediately
-        self.playing_states.insert(id, ());
 
         // Clone mixer and automatically enable GPU if engine was created with GPU support
         let mut mixer_clone = mixer.clone();
-        mixer_clone.prepare_realtime(self.buffer_size as usize);
+        mixer_clone.prepare_realtime(self.buffer_size as usize * 16);
 
         #[cfg(feature = "gpu")]
         if self.enable_gpu_for_samples {
@@ -680,9 +789,13 @@ impl AudioEngine {
             .send(AudioCommand::Play {
                 id,
                 mixer: Box::new(mixer_clone),
+                options: Default::default(),
                 looping: true,
             })
-            .map_err(|_| TunesError::AudioEngineError("Audio engine stopped".to_string()))?;
+            .map_err(|_| {
+                self.playing_states.remove(&id);
+                TunesError::AudioEngineError("Audio command queue full or unavailable".to_string())
+            })?;
         Ok(id)
     }
 
@@ -812,6 +925,14 @@ impl AudioEngine {
     /// pipeline) to hand a decoded sample to the engine so the next
     /// `play_sample(path)` call is an O(1) cache hit.
     pub fn register_sample(&self, path: impl Into<String>, sample: Sample) {
+        #[cfg(all(feature = "worker", target_arch = "wasm32"))]
+        if let Some(session) = self.command_tx.4 {
+            if let Err(error) = worker_transport::upload(session, &sample) {
+                web_sys::console::warn_1(
+                    &format!("[tunes] Sample pre-upload deferred: {error}").into(),
+                );
+            }
+        }
         self.sample_cache.entry(path.into()).or_insert(sample);
     }
 
@@ -857,7 +978,9 @@ impl AudioEngine {
     pub fn stop(&self, id: SoundId) -> Result<()> {
         self.command_tx
             .send(AudioCommand::Stop { id })
-            .map_err(|_| TunesError::AudioEngineError("Audio engine stopped".to_string()))?;
+            .map_err(|_| {
+                TunesError::AudioEngineError("Audio command queue full or unavailable".to_string())
+            })?;
         Ok(())
     }
 
@@ -869,7 +992,9 @@ impl AudioEngine {
     pub fn set_volume(&self, id: SoundId, volume: f32) -> Result<()> {
         self.command_tx
             .send(AudioCommand::SetVolume { id, volume })
-            .map_err(|_| TunesError::AudioEngineError("Audio engine stopped".to_string()))?;
+            .map_err(|_| {
+                TunesError::AudioEngineError("Audio command queue full or unavailable".to_string())
+            })?;
         Ok(())
     }
 
@@ -881,7 +1006,9 @@ impl AudioEngine {
     pub fn set_pan(&self, id: SoundId, pan: f32) -> Result<()> {
         self.command_tx
             .send(AudioCommand::SetPan { id, pan })
-            .map_err(|_| TunesError::AudioEngineError("Audio engine stopped".to_string()))?;
+            .map_err(|_| {
+                TunesError::AudioEngineError("Audio command queue full or unavailable".to_string())
+            })?;
         Ok(())
     }
 
@@ -920,7 +1047,9 @@ impl AudioEngine {
     pub fn set_playback_rate(&self, id: SoundId, rate: f32) -> Result<()> {
         self.command_tx
             .send(AudioCommand::SetPlaybackRate { id, rate })
-            .map_err(|_| TunesError::AudioEngineError("Audio engine stopped".to_string()))?;
+            .map_err(|_| {
+                TunesError::AudioEngineError("Audio command queue full or unavailable".to_string())
+            })?;
         Ok(())
     }
 
@@ -928,7 +1057,9 @@ impl AudioEngine {
     pub fn pause(&self, id: SoundId) -> Result<()> {
         self.command_tx
             .send(AudioCommand::Pause { id })
-            .map_err(|_| TunesError::AudioEngineError("Audio engine stopped".to_string()))?;
+            .map_err(|_| {
+                TunesError::AudioEngineError("Audio command queue full or unavailable".to_string())
+            })?;
         Ok(())
     }
 
@@ -936,7 +1067,9 @@ impl AudioEngine {
     pub fn resume(&self, id: SoundId) -> Result<()> {
         self.command_tx
             .send(AudioCommand::Resume { id })
-            .map_err(|_| TunesError::AudioEngineError("Audio engine stopped".to_string()))?;
+            .map_err(|_| {
+                TunesError::AudioEngineError("Audio command queue full or unavailable".to_string())
+            })?;
         Ok(())
     }
 
@@ -955,9 +1088,9 @@ impl AudioEngine {
     /// # }
     /// ```
     pub fn pause_all(&self) -> Result<()> {
-        self.command_tx
-            .send(AudioCommand::PauseAll)
-            .map_err(|_| TunesError::AudioEngineError("Audio engine stopped".to_string()))?;
+        self.command_tx.send(AudioCommand::PauseAll).map_err(|_| {
+            TunesError::AudioEngineError("Audio command queue full or unavailable".to_string())
+        })?;
         Ok(())
     }
 
@@ -976,9 +1109,9 @@ impl AudioEngine {
     /// # }
     /// ```
     pub fn resume_all(&self) -> Result<()> {
-        self.command_tx
-            .send(AudioCommand::ResumeAll)
-            .map_err(|_| TunesError::AudioEngineError("Audio engine stopped".to_string()))?;
+        self.command_tx.send(AudioCommand::ResumeAll).map_err(|_| {
+            TunesError::AudioEngineError("Audio command queue full or unavailable".to_string())
+        })?;
         Ok(())
     }
 
@@ -998,9 +1131,9 @@ impl AudioEngine {
     /// # }
     /// ```
     pub fn stop_all(&self) -> Result<()> {
-        self.command_tx
-            .send(AudioCommand::StopAll)
-            .map_err(|_| TunesError::AudioEngineError("Audio engine stopped".to_string()))?;
+        self.command_tx.send(AudioCommand::StopAll).map_err(|_| {
+            TunesError::AudioEngineError("Audio command queue full or unavailable".to_string())
+        })?;
         Ok(())
     }
 
@@ -1042,6 +1175,11 @@ impl AudioEngine {
     /// # }
     /// ```
     pub fn set_monitor_callback(&self, callback: MonitorCallbackFn) {
+        #[cfg(all(feature = "worker", target_arch = "wasm32"))]
+        if let Some(session) = self.command_tx.4 {
+            worker_transport::enable_monitor(session, callback.is_some());
+        }
+
         if let Ok(mut guard) = self.monitor_callback.lock() {
             *guard = callback;
         }
@@ -1072,7 +1210,9 @@ impl AudioEngine {
     pub fn fade_out(&self, id: SoundId, duration: f32) -> Result<()> {
         self.command_tx
             .send(AudioCommand::FadeOut { id, duration })
-            .map_err(|_| TunesError::AudioEngineError("Audio engine stopped".to_string()))?;
+            .map_err(|_| {
+                TunesError::AudioEngineError("Audio command queue full or unavailable".to_string())
+            })?;
         Ok(())
     }
 
@@ -1107,7 +1247,9 @@ impl AudioEngine {
                 duration,
                 target_volume,
             })
-            .map_err(|_| TunesError::AudioEngineError("Audio engine stopped".to_string()))?;
+            .map_err(|_| {
+                TunesError::AudioEngineError("Audio command queue full or unavailable".to_string())
+            })?;
         Ok(())
     }
 
@@ -1143,7 +1285,9 @@ impl AudioEngine {
                 target_pan,
                 duration,
             })
-            .map_err(|_| TunesError::AudioEngineError("Audio engine stopped".to_string()))?;
+            .map_err(|_| {
+                TunesError::AudioEngineError("Audio command queue full or unavailable".to_string())
+            })?;
         Ok(())
     }
 
@@ -1181,15 +1325,22 @@ impl AudioEngine {
                 target_rate,
                 duration,
             })
-            .map_err(|_| TunesError::AudioEngineError("Audio engine stopped".to_string()))?;
+            .map_err(|_| {
+                TunesError::AudioEngineError("Audio command queue full or unavailable".to_string())
+            })?;
         Ok(())
     }
 
     /// Check if a sound is still playing
     ///
-    /// Lock-free: reads from a DashMap updated by the audio callback,
+    /// Reads a fixed atomic registry updated by the audio callback,
     /// never contends with the callback mutex.
     pub fn is_playing(&self, id: SoundId) -> bool {
+        #[cfg(all(feature = "worker", target_arch = "wasm32"))]
+        if let Some(session) = self.command_tx.4 {
+            return worker_transport::is_playing(session, id);
+        }
+
         self.playing_states.contains_key(&id)
     }
 
@@ -1494,12 +1645,16 @@ impl AudioEngine {
         self.command_tx
             .send(AudioCommand::StreamFile {
                 id,
-                path: path.into(),
-                looping: false,
-                volume: 1.0,
-                pan: 0.0,
+                stream: Box::new(streaming::StreamingSound::prepare(
+                    path.into(),
+                    false,
+                    self.sample_rate,
+                )),
             })
-            .map_err(|_| TunesError::AudioEngineError("Audio engine stopped".to_string()))?;
+            .map_err(|_| {
+                self.playing_states.remove(&id);
+                TunesError::AudioEngineError("Audio command queue full or unavailable".to_string())
+            })?;
         Ok(id)
     }
 
@@ -1534,12 +1689,16 @@ impl AudioEngine {
         self.command_tx
             .send(AudioCommand::StreamFile {
                 id,
-                path: path.into(),
-                looping: true,
-                volume: 1.0,
-                pan: 0.0,
+                stream: Box::new(streaming::StreamingSound::prepare(
+                    path.into(),
+                    true,
+                    self.sample_rate,
+                )),
             })
-            .map_err(|_| TunesError::AudioEngineError("Audio engine stopped".to_string()))?;
+            .map_err(|_| {
+                self.playing_states.remove(&id);
+                TunesError::AudioEngineError("Audio command queue full or unavailable".to_string())
+            })?;
         Ok(id)
     }
 
@@ -1553,7 +1712,9 @@ impl AudioEngine {
     pub fn stop_stream(&self, id: SoundId) -> Result<()> {
         self.command_tx
             .send(AudioCommand::StopStream { id })
-            .map_err(|_| TunesError::AudioEngineError("Audio engine stopped".to_string()))?;
+            .map_err(|_| {
+                TunesError::AudioEngineError("Audio command queue full or unavailable".to_string())
+            })?;
         Ok(())
     }
 
@@ -1567,7 +1728,9 @@ impl AudioEngine {
     pub fn pause_stream(&self, id: SoundId) -> Result<()> {
         self.command_tx
             .send(AudioCommand::PauseStream { id })
-            .map_err(|_| TunesError::AudioEngineError("Audio engine stopped".to_string()))?;
+            .map_err(|_| {
+                TunesError::AudioEngineError("Audio command queue full or unavailable".to_string())
+            })?;
         Ok(())
     }
 
@@ -1581,7 +1744,9 @@ impl AudioEngine {
     pub fn resume_stream(&self, id: SoundId) -> Result<()> {
         self.command_tx
             .send(AudioCommand::ResumeStream { id })
-            .map_err(|_| TunesError::AudioEngineError("Audio engine stopped".to_string()))?;
+            .map_err(|_| {
+                TunesError::AudioEngineError("Audio command queue full or unavailable".to_string())
+            })?;
         Ok(())
     }
 
@@ -1594,7 +1759,9 @@ impl AudioEngine {
     pub fn set_stream_volume(&self, id: SoundId, volume: f32) -> Result<()> {
         self.command_tx
             .send(AudioCommand::SetStreamVolume { id, volume })
-            .map_err(|_| TunesError::AudioEngineError("Audio engine stopped".to_string()))?;
+            .map_err(|_| {
+                TunesError::AudioEngineError("Audio command queue full or unavailable".to_string())
+            })?;
         Ok(())
     }
 
@@ -1607,7 +1774,9 @@ impl AudioEngine {
     pub fn set_stream_pan(&self, id: SoundId, pan: f32) -> Result<()> {
         self.command_tx
             .send(AudioCommand::SetStreamPan { id, pan })
-            .map_err(|_| TunesError::AudioEngineError("Audio engine stopped".to_string()))?;
+            .map_err(|_| {
+                TunesError::AudioEngineError("Audio command queue full or unavailable".to_string())
+            })?;
         Ok(())
     }
 
@@ -1763,3 +1932,9 @@ impl AudioEngine {
 // Note: Full integration tests requiring audio devices should be placed in
 // tests/integration_tests.rs with #[ignore] attribute for CI environments
 // without audio hardware.
+
+impl Drop for AudioEngine {
+    fn drop(&mut self) {
+        self.command_tx.close();
+    }
+}

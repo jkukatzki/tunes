@@ -270,7 +270,7 @@ mod tests {
     #[test]
     fn test_additive_meter_empty() {
         let pattern = generate(&[]);
-        assert_eq!(pattern, vec![]);
+        assert_eq!(pattern, Vec::<usize>::new());
     }
 
     #[test]

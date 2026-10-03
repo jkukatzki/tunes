@@ -12,7 +12,7 @@
 //! This creates a mixing process similar to how a baker folds dough, hence the name.
 //!
 //! # Mathematical Definition
-//! For (x, y) in [0,1] × [0,1]:
+//! For (x, y) in `[0,1] × [0,1]`:
 //! - If x < 0.5: x_new = 2x,     y_new = y/2
 //! - If x ≥ 0.5: x_new = 2x - 1, y_new = (y + 1)/2
 //!

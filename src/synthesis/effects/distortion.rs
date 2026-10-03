@@ -3,6 +3,7 @@ use crate::track::PRIORITY_NORMAL;
 
 /// Distortion/overdrive effect
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 pub struct Distortion {
     pub drive: f32,   // Drive amount (1.0 = no distortion, higher = more)
     pub mix: f32,     // Wet/dry mix (0.0 = dry, 1.0 = wet)
@@ -177,6 +178,7 @@ impl Distortion {
 
 /// Bit crusher - lo-fi digital degradation effect
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 pub struct BitCrusher {
     pub bit_depth: f32,             // Bit depth (1.0 to 16.0, lower = more crushing)
     pub sample_rate_reduction: f32, // Sample rate divisor (1.0 = no reduction, higher = more lo-fi)
@@ -328,6 +330,7 @@ impl BitCrusher {
 
 /// Saturation effect - analog-style harmonic distortion
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 pub struct Saturation {
     pub drive: f32,     // Drive amount (1.0 to 10.0)
     pub character: f32, // Saturation character (0.0 = soft, 1.0 = hard)

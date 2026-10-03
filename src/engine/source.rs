@@ -13,15 +13,15 @@ pub(crate) enum SoundSource {
 }
 
 pub(crate) struct TrackVoice {
-    track: Track,
+    pub(super) track: Track,
     sample_count: u64,
 }
 
 pub(crate) struct SampleVoice {
-    sample: Sample,
-    speed: f32,
-    volume: f32,
-    pan: f32,
+    pub(super) sample: Sample,
+    pub(super) speed: f32,
+    pub(super) volume: f32,
+    pub(super) pan: f32,
 }
 
 impl SoundSource {
@@ -40,6 +40,14 @@ impl SoundSource {
             volume,
             pan,
         })
+    }
+
+    pub(crate) fn gain_hint(&self) -> f32 {
+        match self {
+            Self::Track(v) => v.track.volume.abs(),
+            Self::Sample(v) => v.volume.abs(),
+            Self::Mixer(_) => 1.0,
+        }
     }
 
     pub(crate) fn duration(&self, looping: bool) -> f32 {

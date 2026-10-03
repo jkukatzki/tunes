@@ -33,6 +33,7 @@ fn fast_inv_sqrt(x: f32) -> f32 {
 
 /// 3D vector for positions and directions
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 pub struct Vec3 {
     pub x: f32,
     pub y: f32,
@@ -130,6 +131,7 @@ impl Vec3 {
 
 /// Distance attenuation model for spatial audio
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 pub enum AttenuationModel {
     /// No attenuation (constant volume regardless of distance)
     None,
@@ -151,6 +153,7 @@ impl Default for AttenuationModel {
 
 /// Spatial position and velocity for a sound source
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 pub struct SpatialPosition {
     /// Position in 3D space
     pub position: Vec3,
@@ -210,6 +213,7 @@ impl Default for SpatialPosition {
 /// );
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 pub struct SoundCone {
     /// Direction the sound source is pointing (normalized)
     pub direction: Vec3,
@@ -283,6 +287,7 @@ impl SoundCone {
 
 /// Listener configuration for spatial audio
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 pub struct ListenerConfig {
     /// Position in 3D space
     pub position: Vec3,
@@ -343,6 +348,7 @@ impl Default for ListenerConfig {
 
 /// Parameters for spatial audio calculation
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 pub struct SpatialParams {
     /// Distance attenuation model
     pub attenuation_model: AttenuationModel,
@@ -376,6 +382,7 @@ impl Default for SpatialParams {
 
 /// Result of spatial audio calculation
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 pub struct SpatialResult {
     /// Volume attenuation (0.0 to 1.0)
     pub volume: f32,

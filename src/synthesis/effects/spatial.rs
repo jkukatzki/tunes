@@ -9,6 +9,7 @@ const DEFAULT_SAMPLE_RATE: f32 = 44100.0;
 /// Creates rhythmic stereo movement by automatically panning the signal
 /// left and right. This is applied at the stereo stage after mono effects.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 pub struct AutoPan {
     pub rate: f32,    // LFO rate in Hz (typically 0.1-10 Hz)
     pub depth: f32,   // Panning depth 0.0 to 1.0 (0.5 = full L-R sweep)

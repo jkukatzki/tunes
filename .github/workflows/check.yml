@@ -1,0 +1,27 @@
+name: Check
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  native:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - run: cargo check --lib
+      - run: cargo test --lib --features worker
+      - run: cargo doc --no-deps --features worker
+        env:
+          RUSTDOCFLAGS: -D warnings
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: cargo check --lib --target wasm32-unknown-unknown --features worker
+      - run: cargo check --locked --manifest-path web-dsp/Cargo.toml --target wasm32-unknown-unknown
+      - run: node --test web-dsp/web/*.test.mjs

@@ -1,10 +1,10 @@
 //! Persistent shared effects after voice envelopes/panning and before the output limiter.
+use super::command_queue::CommandSender;
 use super::{commands::AudioCommand, AudioEngine};
 use crate::{
     error::{Result, TunesError},
     synthesis::effects::{Delay, EffectChain, Reverb},
 };
-use crossbeam::channel::Sender;
 
 /// Linear time-based effects shared by an instrument's voices.
 #[derive(Default, Clone)]
@@ -17,7 +17,8 @@ pub struct BusEffects {
 /// Keep this alongside the instrument, rather than constructing one for every note.
 pub struct EffectBus {
     pub(crate) id: u64,
-    pub(crate) sender: Sender<AudioCommand>,
+    pub(crate) slots: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    pub(crate) sender: CommandSender,
     pub(crate) frames: usize,
 }
 
@@ -34,7 +35,9 @@ impl EffectBus {
                 id: self.id,
                 bus: Box::new(EffectBusState::new(effects, self.frames)),
             })
-            .map_err(|_| TunesError::AudioEngineError("Audio engine stopped".into()))
+            .map_err(|_| {
+                TunesError::AudioEngineError("Audio command queue full or unavailable".into())
+            })
     }
 
     /// Change wet/dry controls without rebuilding delay lines or losing their tails.
@@ -45,7 +48,9 @@ impl EffectBus {
                 delay,
                 reverb,
             })
-            .map_err(|_| TunesError::AudioEngineError("Audio engine stopped".into()))
+            .map_err(|_| {
+                TunesError::AudioEngineError("Audio command queue full or unavailable".into())
+            })
     }
 }
 
@@ -54,12 +59,13 @@ impl Drop for EffectBus {
         let _ = self
             .sender
             .send(AudioCommand::RemoveEffectBus { id: self.id });
+        self.slots.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
     }
 }
 
 pub(crate) struct EffectBusState {
     pub(crate) input: Vec<f32>,
-    effects: [EffectChain; 2],
+    pub(super) effects: [EffectChain; 2],
     mono: [Vec<f32>; 2],
     sample_count: u64,
     pub(crate) paused: bool,

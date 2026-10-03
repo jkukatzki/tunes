@@ -6,6 +6,7 @@ const DEFAULT_SAMPLE_RATE: f32 = 44100.0;
 
 /// Delay effect with feedback
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 pub struct Delay {
     pub delay_time: f32, // Delay time in seconds
     pub feedback: f32,   // Feedback amount (0.0 to 0.99)

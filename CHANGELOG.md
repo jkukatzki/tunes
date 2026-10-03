@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased — public Git fork
+
+- Dedicated browser DSP worker and AudioWorklet output with a standalone build,
+  typed JavaScript host API, foreground suspension/resume and versioned caching.
+- Bounded command queues, parameter coalescing, reserved release capacity, global
+  voice admission, deferred cleanup and demand-driven sidechain metering.
+- Direct track/sample voices and shared stereo delay/reverb buses reduce
+  per-note graph work; overlap, sample boundaries and fade continuity are tested.
+- Vendored CPAL browser scheduling/recovery fixes remain available through `web`.
+- Standalone documentation, lifecycle/transport regression tests and CI checks.
+
+Compatibility: worker protocol v2 requires matched application/DSP modules and
+supports one installed bridge/active engine per page. Worker monitoring provides
+snapshots, not continuous capture. Spectral/convolution effects and native streams
+are unsupported in the worker. Overload may reject or steal voices; observe API
+errors. Shared effects and limiting can change chord dynamics.
+
+Registry publication is intentionally disabled: this fork is distributed through
+Git while its package identity and patched CPAL dependency remain unpublished.
+
+---
+
+# Changelog
+
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),

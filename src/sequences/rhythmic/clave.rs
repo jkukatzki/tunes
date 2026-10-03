@@ -318,13 +318,13 @@ mod tests {
     #[test]
     fn test_clave_pattern_empty() {
         let pattern = clave_pattern(&[], 16);
-        assert_eq!(pattern, vec![]);
+        assert_eq!(pattern, Vec::<usize>::new());
     }
 
     #[test]
     fn test_clave_pattern_all_out_of_bounds() {
         let pattern = clave_pattern(&[20, 30, 40], 16);
-        assert_eq!(pattern, vec![]);
+        assert_eq!(pattern, Vec::<usize>::new());
     }
 
     #[test]

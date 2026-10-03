@@ -1,10 +1,25 @@
 # tunes
 
 A standalone Rust library for music composition, synthesis, and audio generation with real-time, concurrent playback and control.
-Build complex musical pieces with an intuitive, expressive API — no runtime dependencies required.
+Build musical pieces with Rust composition and synthesis APIs. Native playback uses CPAL and the platform audio backend.
 Perfect for algorithmic music, game audio, generative art, and interactive installations.
 
-> **Performance:** CPU synthesis measured at 100x realtime (uncached) and 20.0x realtime (cached complex compositions) on decade old hardware. SIMD sample playback: 1000+ with true concurrent playback (all samples playing simultaneously)** - can handle 500-1500+ concurrent samples in real-world scenarios.  Optional GPU acceleration available via `gpu` feature - provides minimal benefit on integrated GPUs (~1.0x on i5 6500) but scales with discrete GPU hardware.
+This repository is the public Git fork of [sqrew/tunes](https://github.com/sqrew/tunes).
+It adds bounded realtime work and optional dedicated browser DSP. Existing
+upstream attribution and MIT/Apache-2.0 licenses are retained. Performance depends
+on graph complexity and hardware; the worker isolates DSP from UI scheduling but
+does not guarantee glitch-free output under arbitrary load.
+
+```toml
+[dependencies]
+tunes = { git = "https://github.com/jkukatzki/tunes", branch = "pushas-tunes-compat" }
+```
+
+Use `features = ["worker"]` for the dedicated browser backend. Follow
+[browser setup](docs/browser_audio.md) for the standalone build and JavaScript API.
+Upstream crates.io `tunes` is a different distribution; the upstream installation
+examples later in this README do not install this fork's additions. See
+[release requirements](docs/releasing.md) and [changelog](CHANGELOG.md).
 
 ## Changes on `pushas-tunes-compat` compared with `master`
 
@@ -25,8 +40,27 @@ real-time rendering improvements beyond the main `master` branch:
 - Block-level note/drum preparation and reused scratch storage reduce work in
   sample loops. Overlapping events, fractional sample starts, final sample
   frames, and release durations have regression coverage.
+- Callback control work is capped at 64 commands per block, with a bounded
+  queue, coalesced parameter updates, reserved release capacity and an emergency
+  stop on control overload. Completed DSP graphs are reclaimed outside the
+  callback. Native decoder setup also happens outside it.
+- A global budget admits 96 voices, with eight additional short stealing fades,
+  priorities and repeated-incidental-sample limits. Native streams count toward
+  this budget. Playback status uses fixed atomic slots; spatial settings are
+  callback-owned values rather than allocated atomic snapshots.
+- Track/bus RMS scans run only for active sidechain consumers. Prepared render
+  chunks limit scratch growth for larger device callbacks.
+- The game's WASM build now uses a separate DSP worker and AudioWorklet through
+  the `worker` feature and `AudioEngine::with_worker_output()`. The launcher must
+  await `installWorkerAudio()` before starting Rust. Protocol v2 carries tracks,
+  mixer graphs, cached PCM, shared buses, spatial controls and playback controls;
+  native builds retain CPAL. Spectral/convolution effects are explicitly rejected.
+  Four 512-frame stereo buffers isolate ongoing synthesis from main-thread stalls.
+  The user reports improved integrated gameplay on iPhone; systematic validation
+  across devices and browsers remains part of the release checklist.
 
-The latest validation passes 1,602 library tests and native/WASM game checks.
+The latest library validation passes 1,619 tests. Native/WASM game checks and the
+separate worker WASM check pass.
 Device performance gains are not yet measured. Shared piano effects and removal
 of per-note limiting can change chord dynamics. See the
 [realtime audio review](docs/realtime_audio_review.md) for details and limitations.

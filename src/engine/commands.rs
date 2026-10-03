@@ -1,10 +1,8 @@
 //! Audio commands for thread-safe communication with the audio thread.
 //!
-//! Commands are sent from the main thread to the audio thread via a lock-free channel.
+//! Commands use a bounded FIFO with producer-side coalescing.
 
 use crate::synthesis::spatial::{SoundCone, SpatialParams, SpatialPosition};
-#[cfg(not(target_arch = "wasm32"))]
-use std::path::PathBuf;
 
 /// Unique identifier for playing sounds
 pub type SoundId = u64;
@@ -14,6 +12,7 @@ pub(crate) enum AudioCommand {
     PlaySource {
         id: SoundId,
         source: Box<super::source::SoundSource>,
+        options: super::voice_budget::VoiceOptions,
         bus: Option<u64>,
     },
     SetEffectBus {
@@ -31,6 +30,7 @@ pub(crate) enum AudioCommand {
     Play {
         id: SoundId,
         mixer: Box<crate::track::Mixer>,
+        options: super::voice_budget::VoiceOptions,
         looping: bool,
     },
     Stop {
@@ -116,10 +116,7 @@ pub(crate) enum AudioCommand {
     #[cfg(not(target_arch = "wasm32"))]
     StreamFile {
         id: SoundId,
-        path: PathBuf,
-        looping: bool,
-        volume: f32,
-        pan: f32,
+        stream: Box<super::streaming::StreamingSound>,
     },
     #[cfg(not(target_arch = "wasm32"))]
     StopStream {

@@ -5,6 +5,7 @@ use crate::synthesis::wavetable::{SAWTOOTH_WAVETABLE, SQUARE_WAVETABLE, TRIANGLE
 /// All waveforms use band-limited wavetables to prevent aliasing at high frequencies.
 /// This ensures clean audio quality across the entire frequency spectrum.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 pub enum Waveform {
     Sine,
     Square,

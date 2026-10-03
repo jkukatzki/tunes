@@ -6,6 +6,7 @@
 /// The envelope modulates the filter cutoff frequency from a base frequency to
 /// a peak frequency and back, following an ADSR curve.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 pub struct FilterEnvelope {
     pub attack: f32,      // Time to reach peak cutoff (seconds)
     pub decay: f32,       // Time to decay from peak to sustain level (seconds)

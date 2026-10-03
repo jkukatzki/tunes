@@ -19,6 +19,7 @@
 /// ]);
 /// ```
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 pub struct Automation {
     /// Time/value points sorted by time
     points: Vec<(f32, f32)>,
@@ -28,6 +29,7 @@ pub struct Automation {
 
 /// Interpolation methods for automation curves
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 pub enum Interpolation {
     /// No interpolation - value jumps at each point
     Step,

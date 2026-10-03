@@ -503,7 +503,7 @@ impl SimdDispatcher {
         }
     }
 
-    /// Element-wise multiply two buffers: buffer[i] *= modulation[i]
+    /// Element-wise multiply two buffers: `buffer[i] *= modulation[i]`
     ///
     /// Multiplies each element of `buffer` by the corresponding element in `modulation`.
     /// Processes min(buffer.len(), modulation.len()) elements.
@@ -682,7 +682,7 @@ impl SimdDispatcher {
     /// Takes a mono input buffer and mixes it into an interleaved stereo output
     /// buffer with independent left/right gains for panning.
     ///
-    /// Performs: output[i*2] += input[i] * left_gain, output[i*2+1] += input[i] * right_gain
+    /// Performs: `output[i*2] += input[i] * left_gain, output[i*2+1] += input[i] * right_gain`
     #[inline]
     pub fn mix_mono_to_stereo(
         &self,
@@ -763,7 +763,7 @@ impl SimdDispatcher {
     /// needs independent gain control. Input and output are interleaved stereo:
     /// [L0, R0, L1, R1, ...]
     ///
-    /// Performs: output[i] += input[i] * gain (where gain alternates L/R)
+    /// Performs: `output[i] += input[i] * gain` (where gain alternates L/R)
     #[inline]
     pub fn mix_stereo_interleaved(
         &self,

@@ -71,7 +71,7 @@
 /// - Same as Thue-Morse sequence!
 ///
 /// **Binary Tree:**
-/// - Rules: 0→1[0]0, 1→11
+/// - Rules: `0→1[0]0, 1→11`
 /// - Creates branching tree structure
 ///
 /// # Example: Musical Phrase Generator

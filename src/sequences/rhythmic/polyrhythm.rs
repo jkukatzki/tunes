@@ -19,7 +19,7 @@
 /// * `total_length` - Total duration in steps/beats to generate
 ///
 /// # Returns
-/// Vec of Vec<usize>, where each inner Vec contains the hit indices for that voice
+/// `Vec` of `Vec<usize>`, where each inner Vec contains the hit indices for that voice
 ///
 /// # Examples
 /// ```
@@ -184,7 +184,7 @@ pub fn polyrhythm_cycle(ratios: &[usize]) -> (Vec<Vec<usize>>, usize) {
 /// * `cycle_duration` - Duration of one complete cycle in beats
 ///
 /// # Returns
-/// Vec of Vec<f32>, where each inner Vec contains timing in beats
+/// `Vec` of `Vec<f32>`, where each inner Vec contains timing in beats
 ///
 /// # Examples
 /// ```

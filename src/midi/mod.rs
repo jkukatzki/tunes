@@ -7,7 +7,7 @@
 //! # Module Structure
 //!
 //! - [`convert`]: Utility functions for MIDI conversions (notes, drums, timing, etc.)
-//! - [`file`]: MIDI file import/export via [`Mixer::import_midi`] and [`Mixer::export_midi`]
+//! - [`mod@file`]: MIDI file import/export via [`Mixer::import_midi`](crate::track::Mixer::import_midi) and [`Mixer::export_midi`](crate::track::Mixer::export_midi)
 //!
 //! # Examples
 //!

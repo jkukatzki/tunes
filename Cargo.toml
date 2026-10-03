@@ -2,11 +2,13 @@
 name = "tunes"
 version = "1.1.0"
 edition = "2021"
+# Git fork: registry publication must first resolve the patched CPAL dependency.
+publish = false
 authors = ["Nicholas Manson <nicholaspmanson@gmail.com>"]
 description = "A music composition, synthesis, and audio generation library"
-documentation = "https://docs.rs/tunes"
-homepage = "https://github.com/sqrew/tunes"
-repository = "https://github.com/sqrew/tunes"
+documentation = "https://github.com/jkukatzki/tunes/blob/pushas-tunes-compat/docs/browser_audio.md"
+homepage = "https://github.com/jkukatzki/tunes"
+repository = "https://github.com/jkukatzki/tunes"
 readme = "README.md"
 license = "MIT OR Apache-2.0"
 keywords = ["music", "audio", "synthesis", "composition", "game"]
@@ -61,8 +63,11 @@ crate-type = ["cdylib", "rlib"]
 default = []
 gpu = ["wgpu", "pollster", "bytemuck", "futures-intrusive"]
 web = ["cpal/wasm-bindgen"]
+worker = ["web", "dep:serde", "dep:serde_json"]
 
 [dependencies]
+serde = { version = "1", features = ["derive", "rc"], optional = true }
+serde_json = { version = "1", optional = true }
 # Local CPAL 0.15.3 fix for recovery from expired WebAudio playback timestamps.
 cpal = { version = "0.15.3", path = "vendor/cpal" }
 anyhow = "1.0"

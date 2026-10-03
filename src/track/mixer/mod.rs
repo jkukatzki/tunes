@@ -34,13 +34,13 @@ use output_types::{BusOutput, TrackOutput};
 /// Signal flow: Tracks → Buses → Master → Output
 ///
 /// **Performance optimizations:**
-/// - Buses stored in Vec<Bus> indexed by BusId (not HashMap<String, Bus>)
+/// - Buses stored in `Vec<Bus>` indexed by `BusId` (not `HashMap<String, Bus>`)
 /// - Pre-allocated buffers for track_outputs_by_bus, bus_outputs, envelope_cache
 /// - Integer IDs instead of string comparisons in hot path
 #[derive(Debug, Clone)]
 pub struct Mixer {
     // Hot path: Integer-indexed buses for fast iteration
-    pub(super) buses: Vec<Option<Bus>>, // Sparse Vec: Some(bus) at bus.id index, None otherwise
+    pub(crate) buses: Vec<Option<Bus>>, // Sparse Vec: Some(bus) at bus.id index, None otherwise
     bus_order: Vec<BusId>,              // Order in which to process buses
 
     // Cold path: String lookup for user-facing API
@@ -51,6 +51,7 @@ pub struct Mixer {
     track_outputs_by_bus: Vec<Vec<TrackOutput>>,
     bus_outputs: Vec<BusOutput>,
     envelope_cache: EnvelopeCache,
+    envelope_sources: Vec<crate::synthesis::effects::ResolvedSidechainSource>,
 
     // Sample cache for pre-rendered synthesis (lock-free with DashMap)
     pub(crate) cache: Option<Arc<SampleCache>>,
@@ -87,6 +88,7 @@ impl Mixer {
                 .collect(),
             bus_outputs: Vec::with_capacity(INITIAL_BUS_CAPACITY),
             envelope_cache: EnvelopeCache::new(INITIAL_TRACK_CAPACITY, INITIAL_BUS_CAPACITY),
+            envelope_sources: Vec::with_capacity(INITIAL_BUS_CAPACITY + 1),
             cache: None, // Cache disabled by default
             #[cfg(feature = "gpu")]
             gpu_synthesizer: None, // GPU disabled by default (requires explicit enable_gpu call)
@@ -323,8 +325,12 @@ impl Mixer {
     /// Audible event duration, including final note releases, for rendering.
     /// Effect tails beyond the final event are not included.
     pub fn playback_duration(&self) -> f32 {
-        self.buses.iter().flatten().flat_map(|bus| &bus.tracks)
-            .map(Track::playback_duration).fold(0.0, f32::max)
+        self.buses
+            .iter()
+            .flatten()
+            .flat_map(|bus| &bus.tracks)
+            .map(Track::playback_duration)
+            .fold(0.0, f32::max)
     }
 
     /// Check if the mixer has any audio events

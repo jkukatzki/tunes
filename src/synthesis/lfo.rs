@@ -3,6 +3,7 @@ use crate::synthesis::waveform::Waveform;
 /// Low Frequency Oscillator for modulating parameters over time
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 pub struct LFO {
     pub waveform: Waveform,
     pub frequency: f32,    // Frequency in Hz (typically 0.1 to 20 Hz)
@@ -136,6 +137,7 @@ impl LFO {
 
 /// Modulation target - what parameter to modulate
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 pub enum ModTarget {
     FilterCutoff,    // Modulate filter cutoff frequency
     FilterResonance, // Modulate filter resonance
@@ -146,6 +148,7 @@ pub enum ModTarget {
 
 /// A modulation route connects an LFO to a target parameter
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 pub struct ModRoute {
     pub lfo: LFO,
     pub target: ModTarget,

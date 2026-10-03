@@ -15,6 +15,7 @@ use rayon::prelude::*;
 impl Mixer {
     pub(crate) fn prepare_realtime(&mut self, frames: usize) {
         self.realtime = true;
+        self.envelope_sources.reserve(self.buses.len() + 1);
         self.master.prepare_stereo_buffer(frames);
         for bus in self.buses.iter_mut().flatten() {
             bus.scratch_buffer.resize(frames * 2, 0.0);
@@ -57,6 +58,28 @@ impl Mixer {
 
         // Clear envelope cache for this block
         self.envelope_cache.clear();
+        // Only bus/master compressors consume these envelopes. Refresh each
+        // block because callers can mutate public effect configurations.
+        self.envelope_sources.clear();
+        for effects in self
+            .buses
+            .iter()
+            .flatten()
+            .filter(|b| !b.muted)
+            .map(|b| &b.effects)
+            .chain(std::iter::once(&self.master))
+        {
+            if let Some(source) = effects
+                .compressor
+                .as_ref()
+                .and_then(|c| c.resolved_sidechain_source)
+            {
+                if !self.envelope_sources.contains(&source) {
+                    self.envelope_sources.push(source);
+                }
+            }
+        }
+        let sources = &self.envelope_sources;
 
         // TWO-PASS BUS PROCESSING for parallelization with sidechain support:
         // Pass 1: Render all bus audio + calculate envelopes (can be parallel)
@@ -126,8 +149,12 @@ impl Mixer {
                             );
 
                             // Calculate RMS envelope for this track (SIMD-optimized)
-                            let sum_squares = SIMD.sum_of_squares(&buf);
-                            let track_envelope = (sum_squares / num_frames as f32).sqrt();
+                            let track_envelope =
+                                if sources.contains(&ResolvedSidechainSource::Track(track_id)) {
+                                    (SIMD.sum_of_squares(&buf) / num_frames as f32).sqrt()
+                                } else {
+                                    0.0
+                                };
 
                             // Return the buffer to the track
                             track.scratch_buffer = buf;
@@ -155,8 +182,12 @@ impl Mixer {
 
                     // Calculate bus envelope (before effects) - SIMD-optimized
                     // For stereo, RMS = sqrt((sum(L²) + sum(R²)) / (2 * num_frames))
-                    let total_sum_squares = SIMD.sum_of_squares(&bus.scratch_buffer);
-                    let bus_envelope = (total_sum_squares / (2.0 * num_frames as f32)).sqrt();
+                    let bus_envelope = if sources.contains(&ResolvedSidechainSource::Bus(bus_id)) {
+                        (SIMD.sum_of_squares(&bus.scratch_buffer) / (2.0 * num_frames as f32))
+                            .sqrt()
+                    } else {
+                        0.0
+                    };
 
                     Some(BusRenderResult {
                         bus_id,
@@ -222,9 +253,10 @@ impl Mixer {
                     );
 
                     // Calculate RMS envelope for this track (SIMD-optimized)
-                    let sum_squares = SIMD.sum_of_squares(&buf);
-                    let track_envelope = (sum_squares / num_frames as f32).sqrt();
-                    self.envelope_cache.cache_track(track_id, track_envelope);
+                    if sources.contains(&ResolvedSidechainSource::Track(track_id)) {
+                        let envelope = (SIMD.sum_of_squares(&buf) / num_frames as f32).sqrt();
+                        self.envelope_cache.cache_track(track_id, envelope);
+                    }
 
                     // Mix into bus buffer and return buffer to track
                     let pan_angle = (pan + 1.0) * 0.25 * std::f32::consts::PI;
@@ -237,10 +269,12 @@ impl Mixer {
 
                 // Calculate bus envelope (before effects) - SIMD-optimized
                 // For stereo, RMS = sqrt((sum(L²) + sum(R²)) / (2 * num_frames))
-                let total_sum_squares = SIMD.sum_of_squares(&bus.scratch_buffer);
-                let bus_envelope = (total_sum_squares / (2.0 * num_frames as f32)).sqrt();
-
-                self.envelope_cache.cache_bus(bus_id, bus_envelope);
+                if sources.contains(&ResolvedSidechainSource::Bus(bus_id)) {
+                    let envelope = (SIMD.sum_of_squares(&bus.scratch_buffer)
+                        / (2.0 * num_frames as f32))
+                        .sqrt();
+                    self.envelope_cache.cache_bus(bus_id, envelope);
+                }
             }
         }
 
@@ -320,6 +354,37 @@ mod tests {
     use crate::composition::{Composition, Tempo};
     use crate::synthesis::Sample;
 
+    #[test]
+    fn only_requested_sidechain_envelopes_are_measured() {
+        use crate::synthesis::effects::{Compressor, ResolvedSidechainSource};
+        let mut comp = Composition::new(Tempo::new(120.0));
+        comp.track("source").note(&[110.0], 1.0);
+        let mut mixer = comp.into_mixer();
+        mixer.prepare_realtime(128);
+        let bus = mixer.buses.iter().flatten().next().unwrap();
+        let bus_id = bus.id;
+        let track_id = bus.tracks[0].id;
+        let mut buffer = [0.0; 256];
+        mixer.process_block(&mut buffer, 4096.0, 0.05, None, None);
+        assert!(mixer.envelope_sources.is_empty());
+        assert_eq!(mixer.envelope_cache.get_track(track_id), 0.0);
+        let mut compressor = Compressor::gentle();
+        compressor.resolved_sidechain_source = Some(ResolvedSidechainSource::Track(track_id));
+        mixer.master.compressor = Some(compressor);
+        mixer.master.compute_effect_order();
+        mixer.process_block(&mut buffer, 4096.0, 0.1, None, None);
+        assert!(mixer.envelope_cache.get_track(track_id) > 0.0);
+        assert_eq!(mixer.envelope_cache.get_bus(bus_id), 0.0);
+        mixer
+            .master
+            .compressor
+            .as_mut()
+            .unwrap()
+            .resolved_sidechain_source = Some(ResolvedSidechainSource::Bus(bus_id));
+        mixer.process_block(&mut buffer, 4096.0, 0.15, None, None);
+        assert!(mixer.envelope_cache.get_bus(bus_id) > 0.0);
+        assert_eq!(mixer.envelope_cache.get_track(track_id), 0.0);
+    }
     #[test]
     fn realtime_render_matches_offline_with_overlapping_notes_and_effects() {
         let mut comp = Composition::new(Tempo::new(120.0));

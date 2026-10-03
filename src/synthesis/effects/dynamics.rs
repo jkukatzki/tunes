@@ -20,6 +20,7 @@ const DEFAULT_SAMPLE_RATE: f32 = 44100.0;
 ///     .with_sidechain_track("kick");
 /// ```
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 pub enum SidechainSource {
     /// Sidechain from a specific track by name
     Track(String),
@@ -33,6 +34,7 @@ pub enum SidechainSource {
 /// `SidechainSource` with string names, which are resolved to integer IDs when
 /// converting a Composition to a Mixer.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 pub enum ResolvedSidechainSource {
     /// Sidechain from a specific track by ID
     Track(TrackId),
@@ -45,6 +47,7 @@ pub enum ResolvedSidechainSource {
 /// Defines a frequency range and its associated compressor settings.
 /// Used with `Compressor::with_multiband()` or `Compressor::with_multibands()`.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 pub struct CompressorBand {
     pub low_freq: f32,      // Lower frequency bound in Hz
     pub high_freq: f32,     // Upper frequency bound in Hz
@@ -142,6 +145,7 @@ impl CompressorBand {
 
 /// Compressor - dynamic range compression
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 pub struct Compressor {
     pub threshold: f32, // Threshold in amplitude 0.0-1.0 (NOT dB! 0.3 ≈ -10dB, 0.5 ≈ -6dB)
     pub ratio: f32,     // Compression ratio (1.0 = no compression, 10.0 = heavy)
@@ -844,6 +848,7 @@ impl Compressor {
 /// Reduces the level of signals below a threshold, useful for removing
 /// background noise or creating rhythmic gating effects.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 pub struct Gate {
     pub threshold: f32, // Threshold in dB (e.g., -40.0)
     pub ratio: f32,     // Expansion ratio (typically 10:1 to ∞:1, where ∞ = hard gate)
@@ -1060,6 +1065,7 @@ impl Gate {
 /// Prevents signal from exceeding a threshold, acting as a safety net
 /// against clipping. Typically used as the final stage in the signal chain.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 pub struct Limiter {
     pub threshold: f32,  // Threshold in dB (e.g., -0.1 dB)
     pub release: f32,    // Release time in seconds

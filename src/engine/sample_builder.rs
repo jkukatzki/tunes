@@ -45,6 +45,7 @@ pub(crate) enum SampleTransform {
 pub struct SamplePlaybackBuilder<'a> {
     pub(crate) engine: &'a AudioEngine,
     pub(crate) path: String,
+    pub(crate) priority: super::VoicePriority,
     pub(crate) volume: f32,
     pub(crate) pan: f32,
     pub(crate) speed: f32,
@@ -55,11 +56,34 @@ pub struct SamplePlaybackBuilder<'a> {
 }
 
 impl<'a> SamplePlaybackBuilder<'a> {
+    fn voice_options(&self) -> super::voice_budget::VoiceOptions {
+        use std::hash::{Hash, Hasher};
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        self.path.hash(&mut hash);
+        super::voice_budget::VoiceOptions {
+            priority: self.priority,
+            group: Some(hash.finish()),
+            max_instances: if self.priority == super::VoicePriority::Incidental {
+                4
+            } else {
+                0
+            },
+        }
+    }
+
+    /// Set overload admission priority. Incidental samples are limited to four
+    /// concurrent instances of the same path across this engine.
+    pub fn priority(mut self, priority: super::VoicePriority) -> Self {
+        self.priority = priority;
+        self
+    }
+
     /// Create a new builder (internal - use AudioEngine::play_sample())
     pub(crate) fn new(engine: &'a AudioEngine, path: impl Into<String>) -> Self {
         Self {
             engine,
             path: path.into(),
+            priority: super::VoicePriority::Normal,
             volume: 1.0,
             pan: 0.0,
             speed: 1.0,
@@ -580,13 +604,9 @@ impl<'a> SamplePlaybackBuilder<'a> {
             && self.effects.effect_order.is_empty()
         {
             return self.engine.play_source(
-                super::source::SoundSource::sample(
-                    sample,
-                    self.speed,
-                    self.volume,
-                    self.pan,
-                ),
+                super::source::SoundSource::sample(sample, self.speed, self.volume, self.pan),
                 None,
+                self.voice_options(),
             );
         }
 
@@ -730,7 +750,13 @@ impl<'a> SamplePlaybackBuilder<'a> {
             }
         }
 
-        self.engine.play_mixer_realtime(&mixer)
+        let mut mixer = mixer;
+        mixer.prepare_realtime(self.engine.buffer_size as usize * 16);
+        self.engine.play_source(
+            super::source::SoundSource::Mixer(Box::new(mixer)),
+            None,
+            self.voice_options(),
+        )
     }
 }
 

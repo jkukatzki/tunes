@@ -1,5 +1,6 @@
 /// Envelope curve shape
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 pub enum EnvelopeCurve {
     Linear,      // Linear ramps (fastest, but less natural)
     Exponential, // Exponential curves (most natural, default)
@@ -8,6 +9,7 @@ pub enum EnvelopeCurve {
 
 /// ADSR (Attack, Decay, Sustain, Release) envelope for shaping sound amplitude over time
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 pub struct Envelope {
     pub attack: f32,  // Time to reach peak amplitude (seconds)
     pub decay: f32,   // Time to decay from peak to sustain level (seconds)

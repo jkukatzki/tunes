@@ -66,6 +66,7 @@ impl AudioEvent {
 
 /// Represents a note event with timing information
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 pub struct NoteEvent {
     pub frequencies: [f32; 8], // Support up to 8 simultaneous frequencies
     pub num_freqs: usize,
@@ -83,6 +84,7 @@ pub struct NoteEvent {
 
 /// Represents a drum hit event
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 pub struct DrumEvent {
     pub drum_type: DrumType,
     pub start_time: f32,

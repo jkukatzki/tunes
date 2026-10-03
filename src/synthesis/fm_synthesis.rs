@@ -8,6 +8,7 @@ use crate::synthesis::wavetable::WAVETABLE;
 ///
 /// Famous for: DX7 sounds, electric pianos, bells, brass, metallic tones
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "worker", derive(serde::Serialize, serde::Deserialize))]
 pub struct FMParams {
     /// Ratio of modulator frequency to carrier frequency
     /// Common ratios: 1.0 (harmonic), 2.0 (octave up), 0.5 (octave down), 3.5 (inharmonic)

@@ -3,8 +3,9 @@ export type AudioHealth =
   | {
       type: "health";
       renderedFrames: number;
-      underrunFrames: number;
-      queuedBlocks: number;
+      backend?: "worklet";
+      /** CPU callback overruns; hardware dropouts are not observable here. */
+      callbackOverruns?: number;
     }
   | {
       type: "timing";
@@ -15,34 +16,30 @@ export type AudioHealth =
       windowRenders: number;
       windowRenderMs: number;
       windowMaxRenderMs: number;
-      maxRenderGapMs: number;
       maxCallbackMs: number;
-      maxBatchMs: number;
       blockBudgetMs: number;
     }
   | { type: "error"; message: string };
 export interface WorkerAudioOptions {
   /** Create/resume during a user gesture before awaiting downloads. Ownership transfers to Tunes. */
   context?: AudioContext;
-  /** Log aggregated playback diagnostics about every five seconds. */
-  diagnostics?: boolean;
-  /** Buffer pool, 4–32 blocks, initially 512 frames per block. Default 4. Larger pools add input latency. */
-  bufferBlocks?: number;
-  /** Adapt the live pool within 4–32 blocks using output underruns. Default false. */
-  adaptiveBuffering?: boolean;
-  bufferingPolicy?: "conservative" | "balanced" | "optimistic";
+  /** Requested hint of a supplied context; used to avoid unnecessary restarts. */
+  latencyHint?: AudioContextLatencyCategory;
+  /** Compatibility option; AudioWorklet is the only browser backend. */
+  backend?: "worklet";
+  /** Opt in to worklet timing/health measurements; disabled in normal playback. */
   onHealth?: (report: AudioHealth) => void;
 }
 export interface WorkerAudio {
   readonly sampleRate: number;
+  setLatencyHint(hint: AudioContextLatencyCategory): boolean;
+  preferenceStatus(): { applied: string; requested: string; changing: boolean; stage: string; error: string | null };
   bufferStatus(): {
-    blocks: number;
+    backend: "worklet";
     blockFrames: number;
-    adaptive: boolean;
-    policy: string;
+    baseLatency: number | null;
+    outputLatency: number | null;
   };
-  setBlockFrames(frames: 512 | 1024 | 2048 | 4096 | 8192): void;
-  setBufferingPolicy(policy: "conservative" | "balanced" | "optimistic"): void;
   /** Stop DSP, release listeners and close the supplied/created AudioContext. Safe to call twice. */
   close(): Promise<void>;
 }

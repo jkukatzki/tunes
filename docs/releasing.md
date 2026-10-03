@@ -5,13 +5,13 @@ MIT/Apache-2.0 licensing and attribution. The package name/version identify its
 upstream base; they do not claim a new crates.io release. `publish = false`
 prevents accidentally publishing the fork as upstream's `tunes` package.
 
-The repository includes a locally patched CPAL 0.15.3 under `vendor/cpal` with
-its Apache-2.0 license and `LOCAL_PATCH.md`. Git dependencies preserve that path.
-Cargo registry packaging normalizes path dependencies to registry dependencies;
-publishing the current manifest would lose required WebAudio methods and fixes.
-A separately named registry release therefore needs both a deliberate package
-name/version and a published patched backend (or removal/upstreaming of those
-backend changes). Do not remove the publication guard without addressing this.
+The active dependency is crates.io CPAL 0.15.3. The historical patched copy under
+`vendor/cpal` is retained with its Apache-2.0 license and `LOCAL_PATCH.md`, but is
+not used by the manifest. CPAL browser output retains AudioContext lifecycle
+handling without the patched buffer-chain recovery hook. Worker and direct
+AudioWorklet output manage their own lifecycle independently.
+A separately named registry release still needs a deliberate package name and
+version. Do not remove the publication guard without deciding that identity.
 The `web-dsp` companion is also a non-published application crate, distributed as
 browser assets. Its lockfile is committed for reproducible tooling versions.
 

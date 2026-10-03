@@ -1,0 +1,204 @@
+{
+  "buildNote": "Isolated SIMD/O3 DSP build with vendored CPAL; preserves the local crates.io CPAL edit, which lacks recovery_handle.",
+  "environmentNote": "Generated worklet evaluated without global TextEncoder, TextDecoder, crypto or performance. Host CPU timings use performance.now.",
+  "comparedSamples": 9011200,
+  "measuredCallbacks": 32000,
+  "sustained": {
+    "runtime": "v24.9.0",
+    "wasmSha256": "705ffe477adbd6713ad25aace0917dd4a84a85a882b737ae274f10d2c1bff214",
+    "note": "Node CPU simulation; not iPhone audio deadlines",
+    "results": [
+      {
+        "rate": 44100,
+        "voices": 1,
+        "quantum": 128,
+        "meanMs": 0.017759720999999895,
+        "p99Ms": 0.03750000000000142,
+        "maxMs": 0.3838750000000033,
+        "budgetMs": 2.9024943310657596,
+        "cpuOverruns": 0,
+        "maxPcmError": 0
+      },
+      {
+        "rate": 44100,
+        "voices": 12,
+        "quantum": 128,
+        "meanMs": 0.02222331649999982,
+        "p99Ms": 0.03612499999999841,
+        "maxMs": 0.146583000000021,
+        "budgetMs": 2.9024943310657596,
+        "cpuOverruns": 0,
+        "maxPcmError": 0
+      },
+      {
+        "rate": 44100,
+        "voices": 48,
+        "quantum": 128,
+        "meanMs": 0.038643857500000094,
+        "p99Ms": 0.06433400000000233,
+        "maxMs": 0.11066700000000651,
+        "budgetMs": 2.9024943310657596,
+        "cpuOverruns": 0,
+        "maxPcmError": 0
+      },
+      {
+        "rate": 44100,
+        "voices": 96,
+        "quantum": 128,
+        "meanMs": 0.061357498999998795,
+        "p99Ms": 0.10233400000004167,
+        "maxMs": 0.16429200000004585,
+        "budgetMs": 2.9024943310657596,
+        "cpuOverruns": 0,
+        "maxPcmError": 0
+      },
+      {
+        "rate": 48000,
+        "voices": 1,
+        "quantum": 128,
+        "meanMs": 0.016614024499997753,
+        "p99Ms": 0.02575000000001637,
+        "maxMs": 0.09429199999999582,
+        "budgetMs": 2.6666666666666665,
+        "cpuOverruns": 0,
+        "maxPcmError": 0
+      },
+      {
+        "rate": 48000,
+        "voices": 12,
+        "quantum": 128,
+        "meanMs": 0.022205533500001765,
+        "p99Ms": 0.03079200000001947,
+        "maxMs": 0.12245900000004895,
+        "budgetMs": 2.6666666666666665,
+        "cpuOverruns": 0,
+        "maxPcmError": 0
+      },
+      {
+        "rate": 48000,
+        "voices": 48,
+        "quantum": 128,
+        "meanMs": 0.039337917499998015,
+        "p99Ms": 0.058667000000014013,
+        "maxMs": 0.11516600000004473,
+        "budgetMs": 2.6666666666666665,
+        "cpuOverruns": 0,
+        "maxPcmError": 0
+      },
+      {
+        "rate": 48000,
+        "voices": 96,
+        "quantum": 128,
+        "meanMs": 0.06335015649999809,
+        "p99Ms": 0.10758299999997689,
+        "maxMs": 0.20641699999987395,
+        "budgetMs": 2.6666666666666665,
+        "cpuOverruns": 0,
+        "maxPcmError": 0
+      }
+    ]
+  },
+  "churn": {
+    "runtime": "v24.9.0",
+    "wasmSha256": "705ffe477adbd6713ad25aace0917dd4a84a85a882b737ae274f10d2c1bff214",
+    "note": "Node CPU simulation; not iPhone audio deadlines",
+    "results": [
+      {
+        "rate": 44100,
+        "voices": 1,
+        "workload": "churn",
+        "quantum": 128,
+        "meanMs": 0.01983265949999982,
+        "p99Ms": 0.04649999999999466,
+        "maxMs": 0.7420829999999938,
+        "budgetMs": 2.9024943310657596,
+        "cpuOverruns": 0,
+        "maxPcmError": 0
+      },
+      {
+        "rate": 44100,
+        "voices": 12,
+        "workload": "churn",
+        "quantum": 128,
+        "meanMs": 0.027151089000000114,
+        "p99Ms": 0.08562499999999318,
+        "maxMs": 0.3186670000000049,
+        "budgetMs": 2.9024943310657596,
+        "cpuOverruns": 0,
+        "maxPcmError": 0
+      },
+      {
+        "rate": 44100,
+        "voices": 48,
+        "workload": "churn",
+        "quantum": 128,
+        "meanMs": 0.04241688650000074,
+        "p99Ms": 0.07383299999997917,
+        "maxMs": 0.10095799999999144,
+        "budgetMs": 2.9024943310657596,
+        "cpuOverruns": 0,
+        "maxPcmError": 0
+      },
+      {
+        "rate": 44100,
+        "voices": 96,
+        "workload": "churn",
+        "quantum": 128,
+        "meanMs": 0.06712599100000116,
+        "p99Ms": 0.12370899999996254,
+        "maxMs": 0.18079199999999673,
+        "budgetMs": 2.9024943310657596,
+        "cpuOverruns": 0,
+        "maxPcmError": 0
+      },
+      {
+        "rate": 48000,
+        "voices": 1,
+        "workload": "churn",
+        "quantum": 128,
+        "meanMs": 0.018451687999999706,
+        "p99Ms": 0.027458000000024185,
+        "maxMs": 0.07987500000001546,
+        "budgetMs": 2.6666666666666665,
+        "cpuOverruns": 0,
+        "maxPcmError": 0
+      },
+      {
+        "rate": 48000,
+        "voices": 12,
+        "workload": "churn",
+        "quantum": 128,
+        "meanMs": 0.026344945499998745,
+        "p99Ms": 0.04141600000002654,
+        "maxMs": 1.429540999999972,
+        "budgetMs": 2.6666666666666665,
+        "cpuOverruns": 0,
+        "maxPcmError": 0
+      },
+      {
+        "rate": 48000,
+        "voices": 48,
+        "workload": "churn",
+        "quantum": 128,
+        "meanMs": 0.043617692000002935,
+        "p99Ms": 0.07854100000008657,
+        "maxMs": 0.14445900000009715,
+        "budgetMs": 2.6666666666666665,
+        "cpuOverruns": 0,
+        "maxPcmError": 0
+      },
+      {
+        "rate": 48000,
+        "voices": 96,
+        "workload": "churn",
+        "quantum": 128,
+        "meanMs": 0.06783442300000092,
+        "p99Ms": 0.1203330000000733,
+        "maxMs": 0.2275409999999738,
+        "budgetMs": 2.6666666666666665,
+        "cpuOverruns": 0,
+        "maxPcmError": 0
+      }
+    ]
+  }
+}

@@ -1,0 +1,743 @@
+{
+  "note": "Sequential alternating Node WASM runs on development Mac; not iPhone/browser scheduling measurements. Baseline already includes incremental cleanup; comparison isolates interleaved mixing.",
+  "runs": [
+    {
+      "run": 0,
+      "mode": "baseline",
+      "runtime": "v25.2.1",
+      "referenceWasmSha256": "e34c71235d712db11758e263d2c0a8c5108f49bc2f565ed7b09b53f134c5a653",
+      "wasmSha256": "e34c71235d712db11758e263d2c0a8c5108f49bc2f565ed7b09b53f134c5a653",
+      "note": "Node CPU simulation; not iPhone audio deadlines",
+      "results": [
+        {
+          "rate": 44100,
+          "voices": 1,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.021739998499999552,
+          "p99Ms": 0.06845800000000679,
+          "maxMs": 0.2954169999999863,
+          "budgetMs": 2.9024943310657596,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        },
+        {
+          "rate": 44100,
+          "voices": 12,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.026783573500000414,
+          "p99Ms": 0.04220900000001393,
+          "maxMs": 0.993458000000004,
+          "budgetMs": 2.9024943310657596,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        },
+        {
+          "rate": 44100,
+          "voices": 48,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.04543408899999918,
+          "p99Ms": 0.07920899999999165,
+          "maxMs": 0.1392500000000041,
+          "budgetMs": 2.9024943310657596,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        },
+        {
+          "rate": 44100,
+          "voices": 96,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.0700560174999996,
+          "p99Ms": 0.12450000000001182,
+          "maxMs": 0.2514169999999467,
+          "budgetMs": 2.9024943310657596,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        },
+        {
+          "rate": 48000,
+          "voices": 1,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.01972440700000078,
+          "p99Ms": 0.04395800000008876,
+          "maxMs": 0.10224999999991269,
+          "budgetMs": 2.6666666666666665,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        },
+        {
+          "rate": 48000,
+          "voices": 12,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.027213192999999934,
+          "p99Ms": 0.049250000000029104,
+          "maxMs": 0.23808299999996052,
+          "budgetMs": 2.6666666666666665,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        },
+        {
+          "rate": 48000,
+          "voices": 48,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.04519322750000299,
+          "p99Ms": 0.0761250000000473,
+          "maxMs": 0.1195420000001377,
+          "budgetMs": 2.6666666666666665,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        },
+        {
+          "rate": 48000,
+          "voices": 96,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.06999169200000029,
+          "p99Ms": 0.12041700000008859,
+          "maxMs": 0.19054099999993923,
+          "budgetMs": 2.6666666666666665,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        }
+      ]
+    },
+    {
+      "run": 0,
+      "mode": "interleaved",
+      "runtime": "v25.2.1",
+      "referenceWasmSha256": "e34c71235d712db11758e263d2c0a8c5108f49bc2f565ed7b09b53f134c5a653",
+      "wasmSha256": "6f6949bd708ad8252d17e9694c8277a0da65a6dcaabc6c0988b5c65226f87f47",
+      "note": "Node CPU simulation; not iPhone audio deadlines",
+      "results": [
+        {
+          "rate": 44100,
+          "voices": 1,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.02251355349999971,
+          "p99Ms": 0.0675420000000031,
+          "maxMs": 0.2259999999999991,
+          "budgetMs": 2.9024943310657596,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        },
+        {
+          "rate": 44100,
+          "voices": 12,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.026137645000000775,
+          "p99Ms": 0.04479200000000105,
+          "maxMs": 0.9740419999999972,
+          "budgetMs": 2.9024943310657596,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        },
+        {
+          "rate": 44100,
+          "voices": 48,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.041881701500000784,
+          "p99Ms": 0.0731670000000122,
+          "maxMs": 0.16879199999999628,
+          "budgetMs": 2.9024943310657596,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        },
+        {
+          "rate": 44100,
+          "voices": 96,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.06388641899999908,
+          "p99Ms": 0.11983300000008512,
+          "maxMs": 0.20854100000008202,
+          "budgetMs": 2.9024943310657596,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        },
+        {
+          "rate": 48000,
+          "voices": 1,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.01897204349999822,
+          "p99Ms": 0.029334000000062588,
+          "maxMs": 0.059874999999919964,
+          "budgetMs": 2.6666666666666665,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        },
+        {
+          "rate": 48000,
+          "voices": 12,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.0256788095,
+          "p99Ms": 0.04158299999994597,
+          "maxMs": 0.08245799999997416,
+          "budgetMs": 2.6666666666666665,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        },
+        {
+          "rate": 48000,
+          "voices": 48,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.041892243000000634,
+          "p99Ms": 0.07016599999997197,
+          "maxMs": 0.12495799999987867,
+          "budgetMs": 2.6666666666666665,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        },
+        {
+          "rate": 48000,
+          "voices": 96,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.0639382835000008,
+          "p99Ms": 0.11229199999979755,
+          "maxMs": 0.24416699999983393,
+          "budgetMs": 2.6666666666666665,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        }
+      ]
+    },
+    {
+      "run": 1,
+      "mode": "interleaved",
+      "runtime": "v25.2.1",
+      "referenceWasmSha256": "e34c71235d712db11758e263d2c0a8c5108f49bc2f565ed7b09b53f134c5a653",
+      "wasmSha256": "6f6949bd708ad8252d17e9694c8277a0da65a6dcaabc6c0988b5c65226f87f47",
+      "note": "Node CPU simulation; not iPhone audio deadlines",
+      "results": [
+        {
+          "rate": 44100,
+          "voices": 1,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.02277224049999981,
+          "p99Ms": 0.07295799999999986,
+          "maxMs": 0.19533300000000509,
+          "budgetMs": 2.9024943310657596,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        },
+        {
+          "rate": 44100,
+          "voices": 12,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.025529102999999737,
+          "p99Ms": 0.043333000000018274,
+          "maxMs": 0.19895800000000463,
+          "budgetMs": 2.9024943310657596,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        },
+        {
+          "rate": 44100,
+          "voices": 48,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.04140027950000007,
+          "p99Ms": 0.07383299999997917,
+          "maxMs": 0.11479200000002265,
+          "budgetMs": 2.9024943310657596,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        },
+        {
+          "rate": 44100,
+          "voices": 96,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.06319864199999937,
+          "p99Ms": 0.11812499999996362,
+          "maxMs": 0.16912500000000819,
+          "budgetMs": 2.9024943310657596,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        },
+        {
+          "rate": 48000,
+          "voices": 1,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.01932195250000075,
+          "p99Ms": 0.02975000000003547,
+          "maxMs": 1.296457999999916,
+          "budgetMs": 2.6666666666666665,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        },
+        {
+          "rate": 48000,
+          "voices": 12,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.025631726500000184,
+          "p99Ms": 0.040124999999989086,
+          "maxMs": 0.09708399999999529,
+          "budgetMs": 2.6666666666666665,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        },
+        {
+          "rate": 48000,
+          "voices": 48,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.042367271499997514,
+          "p99Ms": 0.07187500000009095,
+          "maxMs": 1.4046670000000177,
+          "budgetMs": 2.6666666666666665,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        },
+        {
+          "rate": 48000,
+          "voices": 96,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.06338414700000157,
+          "p99Ms": 0.11449999999990723,
+          "maxMs": 0.1915000000001328,
+          "budgetMs": 2.6666666666666665,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        }
+      ]
+    },
+    {
+      "run": 1,
+      "mode": "baseline",
+      "runtime": "v25.2.1",
+      "referenceWasmSha256": "e34c71235d712db11758e263d2c0a8c5108f49bc2f565ed7b09b53f134c5a653",
+      "wasmSha256": "e34c71235d712db11758e263d2c0a8c5108f49bc2f565ed7b09b53f134c5a653",
+      "note": "Node CPU simulation; not iPhone audio deadlines",
+      "results": [
+        {
+          "rate": 44100,
+          "voices": 1,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.019969937000000326,
+          "p99Ms": 0.03674999999999784,
+          "maxMs": 0.1962910000000022,
+          "budgetMs": 2.9024943310657596,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        },
+        {
+          "rate": 44100,
+          "voices": 12,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.02630178049999971,
+          "p99Ms": 0.04591700000000287,
+          "maxMs": 0.1689580000000035,
+          "budgetMs": 2.9024943310657596,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        },
+        {
+          "rate": 44100,
+          "voices": 48,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.045127921000000154,
+          "p99Ms": 0.07741599999997106,
+          "maxMs": 0.1449999999999818,
+          "budgetMs": 2.9024943310657596,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        },
+        {
+          "rate": 44100,
+          "voices": 96,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.07064665150000107,
+          "p99Ms": 0.12429199999996854,
+          "maxMs": 0.16670799999997143,
+          "budgetMs": 2.9024943310657596,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        },
+        {
+          "rate": 48000,
+          "voices": 1,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.018452741499998863,
+          "p99Ms": 0.02866699999992761,
+          "maxMs": 0.07991700000002311,
+          "budgetMs": 2.6666666666666665,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        },
+        {
+          "rate": 48000,
+          "voices": 12,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.026413750500000673,
+          "p99Ms": 0.0409589999999298,
+          "maxMs": 0.1440420000000131,
+          "budgetMs": 2.6666666666666665,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        },
+        {
+          "rate": 48000,
+          "voices": 48,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.045589237499999685,
+          "p99Ms": 0.07358300000009876,
+          "maxMs": 1.2418749999999363,
+          "budgetMs": 2.6666666666666665,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        },
+        {
+          "rate": 48000,
+          "voices": 96,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.07039101099999448,
+          "p99Ms": 0.12433299999997871,
+          "maxMs": 0.2632499999999709,
+          "budgetMs": 2.6666666666666665,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        }
+      ]
+    },
+    {
+      "run": 2,
+      "mode": "baseline",
+      "runtime": "v25.2.1",
+      "referenceWasmSha256": "e34c71235d712db11758e263d2c0a8c5108f49bc2f565ed7b09b53f134c5a653",
+      "wasmSha256": "e34c71235d712db11758e263d2c0a8c5108f49bc2f565ed7b09b53f134c5a653",
+      "note": "Node CPU simulation; not iPhone audio deadlines",
+      "results": [
+        {
+          "rate": 44100,
+          "voices": 1,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.020332318499999995,
+          "p99Ms": 0.03679200000000549,
+          "maxMs": 0.17258299999998883,
+          "budgetMs": 2.9024943310657596,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        },
+        {
+          "rate": 44100,
+          "voices": 12,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.026503809500000117,
+          "p99Ms": 0.04316700000001106,
+          "maxMs": 0.15258399999999028,
+          "budgetMs": 2.9024943310657596,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        },
+        {
+          "rate": 44100,
+          "voices": 48,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.045777221500000055,
+          "p99Ms": 0.08054200000003675,
+          "maxMs": 0.14358299999997826,
+          "budgetMs": 2.9024943310657596,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        },
+        {
+          "rate": 44100,
+          "voices": 96,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.07078838100000101,
+          "p99Ms": 0.12654199999997218,
+          "maxMs": 0.22366699999997763,
+          "budgetMs": 2.9024943310657596,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        },
+        {
+          "rate": 48000,
+          "voices": 1,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.019000767000002385,
+          "p99Ms": 0.02908300000001418,
+          "maxMs": 0.11870799999996962,
+          "budgetMs": 2.6666666666666665,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        },
+        {
+          "rate": 48000,
+          "voices": 12,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.026832741000000625,
+          "p99Ms": 0.04433299999993778,
+          "maxMs": 0.11745799999994233,
+          "budgetMs": 2.6666666666666665,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        },
+        {
+          "rate": 48000,
+          "voices": 48,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.045433187000000826,
+          "p99Ms": 0.07708400000001348,
+          "maxMs": 0.20470799999998235,
+          "budgetMs": 2.6666666666666665,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        },
+        {
+          "rate": 48000,
+          "voices": 96,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.07141206000000068,
+          "p99Ms": 0.12945799999988594,
+          "maxMs": 0.2487909999999829,
+          "budgetMs": 2.6666666666666665,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        }
+      ]
+    },
+    {
+      "run": 2,
+      "mode": "interleaved",
+      "runtime": "v25.2.1",
+      "referenceWasmSha256": "e34c71235d712db11758e263d2c0a8c5108f49bc2f565ed7b09b53f134c5a653",
+      "wasmSha256": "6f6949bd708ad8252d17e9694c8277a0da65a6dcaabc6c0988b5c65226f87f47",
+      "note": "Node CPU simulation; not iPhone audio deadlines",
+      "results": [
+        {
+          "rate": 44100,
+          "voices": 1,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.02254823250000001,
+          "p99Ms": 0.07062499999999261,
+          "maxMs": 0.20445800000000247,
+          "budgetMs": 2.9024943310657596,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        },
+        {
+          "rate": 44100,
+          "voices": 12,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.025508469999999776,
+          "p99Ms": 0.042124999999998636,
+          "maxMs": 0.1391670000000147,
+          "budgetMs": 2.9024943310657596,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        },
+        {
+          "rate": 44100,
+          "voices": 48,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.042107139000000585,
+          "p99Ms": 0.07695799999999053,
+          "maxMs": 0.247208999999998,
+          "budgetMs": 2.9024943310657596,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        },
+        {
+          "rate": 44100,
+          "voices": 96,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.06440542800000139,
+          "p99Ms": 0.12320799999997689,
+          "maxMs": 0.191791999999964,
+          "budgetMs": 2.9024943310657596,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        },
+        {
+          "rate": 48000,
+          "voices": 1,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.018975987999999746,
+          "p99Ms": 0.02941699999996672,
+          "maxMs": 0.05945799999994961,
+          "budgetMs": 2.6666666666666665,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        },
+        {
+          "rate": 48000,
+          "voices": 12,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.0257373609999986,
+          "p99Ms": 0.04112499999996544,
+          "maxMs": 0.12316599999996924,
+          "budgetMs": 2.6666666666666665,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        },
+        {
+          "rate": 48000,
+          "voices": 48,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.04224414599999579,
+          "p99Ms": 0.07429200000001401,
+          "maxMs": 0.14875000000006366,
+          "budgetMs": 2.6666666666666665,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        },
+        {
+          "rate": 48000,
+          "voices": 96,
+          "workload": "churn",
+          "quantum": 128,
+          "meanMs": 0.06446009850000041,
+          "p99Ms": 0.12087499999984175,
+          "maxMs": 0.27270899999984977,
+          "budgetMs": 2.6666666666666665,
+          "cpuOverruns": 0,
+          "maxPcmError": 0
+        }
+      ]
+    }
+  ],
+  "retirement": {
+    "wasmSha256": "e34c71235d712db11758e263d2c0a8c5108f49bc2f565ed7b09b53f134c5a653",
+    "note": "Node WASM CPU timing, 200 measured chord stops per case. No iPhone performance claim.",
+    "results": [
+      {
+        "voices": 12,
+        "mode": "unbounded",
+        "stop": {
+          "meanMs": 0.002437460000000584,
+          "p95Ms": 0.00520800000000321,
+          "maxMs": 0.008749999999999147
+        },
+        "followup": {
+          "meanMs": 0.0006112249999998954,
+          "p95Ms": 0.0012079999999983215,
+          "maxMs": 0.15825000000000244
+        },
+        "maxRetired": 0,
+        "pcmSha256": "a93c2bb0948cd7c5efbbd499fe1ac88e017ce79213486485f0efd387b406ee52"
+      },
+      {
+        "voices": 12,
+        "mode": "incremental",
+        "stop": {
+          "meanMs": 0.0015897999999998547,
+          "p95Ms": 0.0018340000000023338,
+          "maxMs": 0.002250000000003638
+        },
+        "followup": {
+          "meanMs": 0.0005090751612904031,
+          "p95Ms": 0.0012499999999988631,
+          "maxMs": 0.08800000000000807
+        },
+        "maxRetired": 4,
+        "pcmSha256": "a93c2bb0948cd7c5efbbd499fe1ac88e017ce79213486485f0efd387b406ee52"
+      },
+      {
+        "voices": 48,
+        "mode": "unbounded",
+        "stop": {
+          "meanMs": 0.004838999999999416,
+          "p95Ms": 0.00549999999999784,
+          "maxMs": 0.010792000000009239
+        },
+        "followup": {
+          "meanMs": 0.00042225387096770815,
+          "p95Ms": 0.00045800000000895125,
+          "maxMs": 0.01141700000000867
+        },
+        "maxRetired": 0,
+        "pcmSha256": "a93c2bb0948cd7c5efbbd499fe1ac88e017ce79213486485f0efd387b406ee52"
+      },
+      {
+        "voices": 48,
+        "mode": "incremental",
+        "stop": {
+          "meanMs": 0.002756685000000161,
+          "p95Ms": 0.003542000000010148,
+          "maxMs": 0.05091600000000085
+        },
+        "followup": {
+          "meanMs": 0.0007508261290322704,
+          "p95Ms": 0.0014170000000035543,
+          "maxMs": 0.014834000000007563
+        },
+        "maxRetired": 4,
+        "pcmSha256": "a93c2bb0948cd7c5efbbd499fe1ac88e017ce79213486485f0efd387b406ee52"
+      },
+      {
+        "voices": 96,
+        "mode": "unbounded",
+        "stop": {
+          "meanMs": 0.007838485000001895,
+          "p95Ms": 0.008333000000021684,
+          "maxMs": 0.010416999999989685
+        },
+        "followup": {
+          "meanMs": 0.0004135688709678862,
+          "p95Ms": 0.00045799999998052954,
+          "maxMs": 0.0017080000000078144
+        },
+        "maxRetired": 0,
+        "pcmSha256": "a93c2bb0948cd7c5efbbd499fe1ac88e017ce79213486485f0efd387b406ee52"
+      },
+      {
+        "voices": 96,
+        "mode": "incremental",
+        "stop": {
+          "meanMs": 0.0028058299999979396,
+          "p95Ms": 0.0030830000000037217,
+          "maxMs": 0.010125000000016371
+        },
+        "followup": {
+          "meanMs": 0.0009508837096763275,
+          "p95Ms": 0.001209000000017113,
+          "maxMs": 0.008874999999989086
+        },
+        "maxRetired": 4,
+        "pcmSha256": "a93c2bb0948cd7c5efbbd499fe1ac88e017ce79213486485f0efd387b406ee52"
+      }
+    ]
+  }
+}

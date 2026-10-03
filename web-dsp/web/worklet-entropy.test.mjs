@@ -1,0 +1,22 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { WorkletEntropy } from "./worklet-entropy.mjs";
+test("entropy preserves host bytes across bounded refill buffers", () => {
+  const pool = new WorkletEntropy();
+  let requests = 0;
+  pool.request = () => requests++;
+  pool.add(new Uint8Array(65536).fill(3));
+  const first = new Uint8Array(40000);
+  pool.fill(first);
+  assert.ok(first.every((v) => v === 3));
+  assert.equal(requests, 1);
+  pool.fill(new Uint8Array(100));
+  assert.equal(requests, 1);
+  pool.add(new Uint8Array(65536).fill(9));
+  assert.throws(() => pool.add(new Uint8Array(65536)), /excess/);
+  const second = new Uint8Array(30000);
+  pool.fill(second);
+  assert.ok(second.subarray(0, 25436).every((v) => v === 3));
+  assert.ok(second.subarray(25436).every((v) => v === 9));
+  assert.throws(() => pool.fill(new Uint8Array(65536)), /exhausted/);
+});

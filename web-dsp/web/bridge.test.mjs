@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
-import { AdaptiveBuffer } from "./adaptive-buffer.mjs";
+import { restartableAudio } from "./audio-restart.mjs";
 import { AudioCommandQueue } from "./command-queue.mjs";
 async function setup(options = {}, globals = {}) {
   const events = new Map(),
@@ -13,10 +13,12 @@ async function setup(options = {}, globals = {}) {
     removeEventListener: (k) => events.delete(k),
   };
   const audio = {
+    currentTime: 0,
     sampleRate: 44100,
     state: "running",
     audioWorklet: { async addModule() {} },
     destination: {},
+    createGain() { return { gain: { value: 1 }, connect() {}, disconnect() {} }; },
     async resume() {
       this.state = "running";
     },
@@ -30,7 +32,7 @@ async function setup(options = {}, globals = {}) {
   let worker;
   class Worker {
     constructor() {
-      worker = this;
+      throw new Error("Dedicated Worker must not be constructed");
     }
     postMessage(m) {
       posts.push(m);
@@ -42,8 +44,37 @@ async function setup(options = {}, globals = {}) {
     terminate() {}
   }
   class AudioWorkletNode {
-    constructor() {
-      this.port = { postMessage() {} };
+    constructor(_context, name) {
+      this.name = name;
+      this.port = {
+        postMessage: (message) => {
+          if (name === "tunes-dsp") {
+            posts.push(message);
+            if (message.type === "batch" && globals.autoAck) {
+              this.session ??= 0;
+              this.playing ??= new Set();
+              for (const packet of message.packets) {
+                if (packet.kind === 'playback-snapshot' || packet.kind === 'restore-playback')
+                  queueMicrotask(() => this.port.onmessage({data: { type: 'playback-reply', request: packet.request,
+                    snapshot: JSON.stringify((packet.ids ?? []).map(id => [id, {elapsed_time:12}])) }}));
+                if (packet.kind === "reset") { this.session = packet.session; this.playing.clear(); }
+                if (packet.kind === "wire") {
+                  const command = JSON.parse(packet.json);
+                  if (command.op.kind === "Play") this.playing.add(command.id);
+                }
+              }
+              queueMicrotask(() => this.port.onmessage({ data: {
+                type: "ack", session: this.session, sequence: message.packets.at(-1).seq,
+                playing: [...this.playing], errors: [],
+              } }));
+            }
+            if (message.type === "init")
+              queueMicrotask(() =>
+                this.port.onmessage({ data: { type: "ready", protocol: 2 } }),
+              );
+          }
+        },
+      };
       nodes.push(this);
     }
     connect() {}
@@ -54,9 +85,12 @@ async function setup(options = {}, globals = {}) {
     performance,
     Float32Array,
     AudioCommandQueue,
-    AdaptiveBuffer,
+    restartableAudio,
     Worker,
     AudioWorkletNode,
+    AudioContext: class {
+      constructor(options) { Object.assign(this, audio); this.options = options; this.state = "running"; }
+    },
     MessageChannel: class {
       constructor() {
         this.port1 = {};
@@ -69,6 +103,10 @@ async function setup(options = {}, globals = {}) {
     navigator: { audioSession: { type: "auto" } },
     window: target,
     document: { ...target, hidden: false },
+    WebAssembly: { compile: async () => ({ compiled: true }) },
+    fetch: async () => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(0) }),
+    crypto: { getRandomValues: bytes => bytes.fill(1) },
+    Uint8Array,
     ...globals,
   });
   let source = readFileSync(new URL("./bridge.js", import.meta.url), "utf8");
@@ -96,7 +134,7 @@ async function setup(options = {}, globals = {}) {
     posts,
     context,
     ack: (data) =>
-      worker.onmessage({
+      nodes[0].port.onmessage({
         data: { type: "ack", playing: [], errors: [], ...data },
       }),
   };
@@ -160,96 +198,114 @@ test("installed bridge prevents duplicate ownership and releases globals on clos
   assert.equal(context.__tunesWorkerAttach, undefined);
 });
 
-test("diagnostics aggregate intervals and rate-limit console output", async () => {
-  let now = 0;
-  const logs = [];
-  const { bridge, worker, nodes, audio } = await setup(
-    { diagnostics: true },
+test("direct backend starts without a Worker", async () => {
+  const { bridge, worker, nodes, posts, audio } = await setup(
+    {},
     {
-      performance: { now: () => now },
-      console: {
-        info: (...args) => logs.push(args),
-        warn: (...args) => logs.push(args),
-      },
+      WebAssembly: { compile: async () => ({ compiled: true }) },
+      fetch: async () => ({
+        ok: true,
+        arrayBuffer: async () => new ArrayBuffer(0),
+      }),
+      crypto: { getRandomValues: (bytes) => bytes.fill(1) },
+      Uint8Array,
     },
   );
-  audio.currentTime = 5;
-  worker.onmessage({
-    data: {
-      type: "timing",
-      windowRenders: 100,
-      windowRenderMs: 50,
-      windowMaxRenderMs: 2,
-      maxRenderGapMs: 80,
-      maxCallbackMs: 3,
-      maxBatchMs: 4,
-      rejected: 2,
-    },
-  });
-  const health = (frames, underruns) =>
-    nodes[0].port.onmessage({
-      data: {
-        type: "health",
-        renderedFrames: frames,
-        underrunFrames: underruns,
-        queuedBlocks: 1,
-      },
-    });
-  now = 1000;
-  health(44100, 441);
-  assert.equal(logs.length, 0);
-  now = 5000;
-  health(220500, 441);
-  const first = JSON.parse(
-    logs[0][0].slice("[tunes] Audio diagnostics ".length),
-  );
-  assert.equal(first.underrunMs, 10);
-  assert.equal(first.meanRenderMs, 0.5);
-  assert.equal(first.maxRenderGapMs, 80);
-  now = 10000;
-  health(441000, 441);
-  const second = JSON.parse(
-    logs[1][0].slice("[tunes] Audio diagnostics ".length),
-  );
-  assert.equal(second.underrunMs, 0);
-  assert.equal(second.timingReports, 0);
-  assert.equal(second.maxRenderGapMs, 0);
-  assert.equal(second.rejectedCommands, 0);
+  assert.equal(worker, undefined);
+  assert.equal(nodes[0].name, "tunes-dsp");
+  assert.equal(bridge.bufferStatus().blockFrames, 128);
+  const before = posts.length;
+  assert.equal(bridge.setBlockFrames, undefined);
+  assert.equal(bridge.setBufferLimit, undefined);
+  assert.equal(posts.length, before);
+  nodes[0].port.onmessage({ data: { type: "entropy-needed" } });
+  assert.equal(posts.at(-1).bytes.length, 65536);
   await bridge.close();
+  assert.equal(audio.state, "closed");
+  assert.equal(posts.at(-1).type, "close");
 });
 
-test("adaptive mode sends bounded live targets without recreating the audio graph", async () => {
-  const { bridge, nodes, posts } = await setup({
-    bufferBlocks: 24,
-    adaptiveBuffering: true,
+const flushPromises = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
+test("a late hide suspension resumes after returning, without replacing DSP", async () => {
+  const { bridge, audio, events, posts } = await setup();
+  let finish;
+  audio.suspend = () => new Promise(resolve => {
+    finish = () => { audio.state = "suspended"; resolve(); };
   });
-  assert.equal(posts.find((p) => p.type === "init").maxBufferBlocks, 32);
-  for (let i = 1; i <= 5; i++)
-    nodes[0].port.onmessage({
-      data: {
-        type: "health",
-        renderedFrames: i * 44100,
-        underrunFrames: i * 128,
-        queuedBlocks: 0,
-      },
-    });
-  assert.equal(posts.find((p) => p.type === "buffer-target").bufferBlocks, 32);
-  assert.equal(nodes.length, 1);
+  events.get("pagehide")();
+  events.get("pointerup")(); // document.hidden can still be false during pagehide.
+  events.get("pageshow")();
+  finish();
+  await flushPromises();
+  assert.equal(audio.state, "running");
+  assert.equal(posts.filter(p => p.type === "init").length, 1);
   await bridge.close();
 });
-
-test("live block size waits for worker acknowledgement and clamps adaptive target", async () => {
-  const { bridge, worker, posts } = await setup({
-    bufferBlocks: 24,
-    adaptiveBuffering: true,
+test("a late foreground resume cannot restart hidden audio", async () => {
+  const { bridge, audio, events } = await setup();
+  let finish;
+  audio.resume = () => new Promise(resolve => {
+    finish = () => { audio.state = "running"; resolve(); };
   });
-  bridge.setBlockFrames(8192);
-  assert.equal(posts.at(-1).type, "block-frames");
-  assert.equal(bridge.bufferStatus().blockFrames, 512);
-  worker.onmessage({ data: { type: "block-frames-ready", frames: 8192 } });
-  assert.equal(bridge.bufferStatus().blockFrames, 8192);
-  assert.equal(bridge.bufferStatus().blocks, 4);
-  assert.equal(posts.at(-1).type, "buffer-target");
-  assert.throws(() => bridge.setBlockFrames(999), /Invalid DSP block size/);
+  events.get("pageshow")();
+  events.get("pagehide")();
+  finish();
+  await flushPromises();
+  assert.equal(audio.state, "suspended");
   await bridge.close();
+});
+test("frozen running context gets one recovery cycle, then a gesture can retry", async () => {
+  const timers = new Map();
+  let next = 0;
+  const { bridge, audio, events } = await setup({}, {
+    setTimeout: cb => { timers.set(++next, cb); return next; },
+    clearTimeout: id => timers.delete(id),
+  });
+  let suspends = 0;
+  audio.suspend = async () => { suspends++; audio.state = "suspended"; };
+  const tick = async () => {
+    const entries = [...timers];
+    timers.clear();
+    for (const [, cb] of entries) cb();
+    await flushPromises();
+  };
+  events.get("pageshow")();
+  await tick();
+  assert.equal(suspends, 1);
+  await tick();
+  assert.equal(suspends, 1);
+  assert.equal(timers.size, 0);
+  events.get("pointerup")();
+  audio.currentTime += 0.6;
+  await tick();
+  assert.equal(suspends, 1);
+  events.get("pointerup")();
+  assert.equal(timers.size, 0);
+  events.get("pageshow")();
+  await bridge.close();
+  assert.equal(timers.size, 0);
+});
+
+test("removed worker backend is rejected explicitly", async () => {
+  await assert.rejects(setup({ backend: "worker" }), /Only AudioWorklet/);
+});
+
+test("installed globals survive an automatic context replacement", async () => {
+  const { bridge, context, audio, nodes } = await setup({}, { autoAck: true });
+  await bridge.close();
+  const installed = await context.installWorkerAudio({ context: audio });
+  const session = context.__tunesWorkerAttach();
+  context.__tunesWorkerPcm(session, "sample", new Float32Array([0.1, 0.2]));
+  context.__tunesWorkerSend(session, JSON.stringify({version:2,id:"42",op:{kind:"Play",source:{Sample:{key:"sample"}}}}));
+  const send = context.__tunesWorkerSend;
+  assert.equal(context.__tunesAudioLatencyHint("balanced"), true);
+  for (let i = 0; i < 400 && installed.preferenceStatus().changing; i++)
+    await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(installed.preferenceStatus().applied, "balanced");
+  assert.equal(installed.preferenceStatus().error, null);
+  assert.equal(context.__tunesWorkerSend, send);
+  assert.equal(context.__tunesWorkerPlaying(session, "42"), true);
+  assert.equal(nodes.length, 3);
+  await installed.close();
+  assert.equal(context.__tunesAudioLatencyHint, undefined);
 });

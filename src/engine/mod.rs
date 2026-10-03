@@ -47,8 +47,6 @@ mod tests;
 #[cfg(all(target_arch = "wasm32", feature = "web"))]
 mod web_audio;
 #[cfg(all(target_arch = "wasm32", feature = "web"))]
-mod web_audio_diagnostics;
-#[cfg(all(target_arch = "wasm32", feature = "web"))]
 mod web_audio_recovery;
 
 pub use commands::SoundId;
@@ -174,7 +172,7 @@ impl AudioEngine {
             worker_transport::attach().map_err(TunesError::AudioEngineError)?;
         let playing_states = Arc::new(playing_states::PlayingStates::new());
         web_sys::console::info_1(
-            &"[tunes] Dedicated DSP worker + AudioWorklet output active (protocol v2)".into(),
+            &"[tunes] Direct AudioWorklet DSP output active (protocol v2)".into(),
         );
         Ok(Self {
             command_tx: CommandSender::for_worker(session, playing_states.clone()),
@@ -188,7 +186,7 @@ impl AudioEngine {
             _web_audio: None,
             _stream: None,
             output_factory: None,
-            device_name: "Dedicated DSP worker + AudioWorklet".into(),
+            device_name: "Direct AudioWorklet DSP".into(),
             buffer_size: 512,
             channels: 2,
             enable_gpu_for_samples: false,
@@ -410,16 +408,12 @@ impl AudioEngine {
 
             let mut command_batch = Vec::with_capacity(command_queue::COMMANDS_PER_CALLBACK);
             let mut output_limiter = output_limiter::OutputLimiter::new();
-            #[cfg(all(target_arch = "wasm32", feature = "web"))]
-            let mut diagnostics = web_audio_diagnostics::CallbackDiagnostics::default();
 
             // Build the persistent output stream
             device
                 .build_output_stream(
                     &stream_config,
                     move |data: &mut [f32], _info: &cpal::OutputCallbackInfo| {
-                        #[cfg(all(target_arch = "wasm32", feature = "web"))]
-                        let callback_started = web_audio_diagnostics::now_ms();
                         // Lock only AudioCallbackState (one lock instead of three!)
                         // If mutex is poisoned, output silence and return early
                         let mut state = match callback_state_for_stream.try_lock() {
@@ -516,13 +510,6 @@ impl AudioEngine {
                                 }
                             }
                         }
-                        #[cfg(all(target_arch = "wasm32", feature = "web"))]
-                        diagnostics.record(
-                            callback_started,
-                            _info,
-                            data.len() / channels,
-                            sample_rate,
-                        );
                     },
                     err_fn,
                     None,

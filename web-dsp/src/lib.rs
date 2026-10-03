@@ -27,6 +27,15 @@ impl DspWorker {
         if !rate.is_finite() || !(8000.0..=192000.0).contains(&rate) {
             return Err(JsValue::from_str("invalid sample rate"));
         }
+        // Build lazy oscillator tables before playback, never on the first note.
+        for waveform in [
+            Waveform::Sine,
+            Waveform::Square,
+            Waveform::Sawtooth,
+            Waveform::Triangle,
+        ] {
+            std::hint::black_box(waveform.sample(0.0));
+        }
         Ok(Self {
             renderer: AudioRenderer::new(rate, FRAMES),
             samples: HashMap::new(),
@@ -66,6 +75,19 @@ impl DspWorker {
     }
     pub fn playing_ids(&self) -> Vec<String> {
         self.renderer.playing_ids()
+    }
+    pub fn flush_commands(&mut self) {
+        self.renderer.flush_commands();
+    }
+    pub fn playback_snapshot(&mut self, ids: Vec<String>) -> Result<String, JsValue> {
+        self.renderer
+            .playback_snapshot(&ids)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+    pub fn restore_playback(&mut self, json: &str) -> Result<(), JsValue> {
+        self.renderer
+            .restore_playback(json)
+            .map_err(|e| JsValue::from_str(&e))
     }
     pub fn reset(&mut self) {
         self.renderer = AudioRenderer::new(self.rate, self.frames);
@@ -171,7 +193,7 @@ impl DspWorker {
     }
     /// Change the block size between render jobs, preserving active voices.
     pub fn set_block_frames(&mut self, frames: usize) -> Result<(), JsValue> {
-        if !matches!(frames, 512 | 1024 | 2048 | 4096 | 8192) {
+        if !matches!(frames, 128 | 256 | 512 | 1024 | 2048 | 4096 | 8192) {
             return Err(JsValue::from_str("invalid DSP block size"));
         }
         self.renderer.set_block_frames(frames);
@@ -196,6 +218,10 @@ impl DspWorker {
         self.renderer.render(&mut self.output);
         self.output.clone()
     }
+    pub fn collect_garbage_budget(&self, per_pool: usize) -> usize {
+        self.renderer.collect_garbage_budget(per_pool)
+    }
+
     pub fn collect_garbage(&self) {
         self.renderer.collect_garbage();
     }

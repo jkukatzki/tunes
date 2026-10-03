@@ -7,7 +7,7 @@ Perfect for algorithmic music, game audio, generative art, and interactive insta
 This repository is the public Git fork of [sqrew/tunes](https://github.com/sqrew/tunes).
 It adds bounded realtime work and optional dedicated browser DSP. Existing
 upstream attribution and MIT/Apache-2.0 licenses are retained. Performance depends
-on graph complexity and hardware; the worker isolates DSP from UI scheduling but
+on graph complexity and hardware; the AudioWorklet isolates DSP from UI scheduling but
 does not guarantee glitch-free output under arbitrary load.
 
 ```toml
@@ -26,9 +26,11 @@ examples later in this README do not install this fork's additions. See
 This game-integration branch adds browser/iOS audio lifecycle recovery and
 real-time rendering improvements beyond the main `master` branch:
 
-- Browser audio suspension/resume and foreground output recovery, with timing
-  diagnostics and vendored CPAL scheduling fixes; native iOS uses the default
+- Browser audio suspension/resume and foreground output recovery. AudioWorklet output manages its own lifecycle, and native iOS uses the default
   device buffer size.
+- Interleaved SIMD stereo mixing avoids channel shuffles. Direct AudioWorklet
+  output spreads retired voice/effect destruction across callbacks with separate
+  cleanup budgets; individual destructor time is not bounded.
 - Continuous fades, bounded retirement of faded voices, dense active-sound
   storage, prepared realtime mixers, and a limiter on the final mixed output.
 - Direct track and plain-sample playback avoid constructing a full composition
@@ -53,7 +55,7 @@ real-time rendering improvements beyond the main `master` branch:
   sample-parity results are recorded in the realtime audio review.
 - Track/bus RMS scans run only for active sidechain consumers. Prepared render
   chunks limit scratch growth for larger device callbacks.
-- The game's WASM build now uses a separate DSP worker and AudioWorklet through
+- The game's WASM build now uses a separate DSP WASM module on the AudioWorklet thread through
   the `worker` feature and `AudioEngine::with_worker_output()`. The launcher must
   await `installWorkerAudio()` before starting Rust. Protocol v2 carries tracks,
   mixer graphs, cached PCM, shared buses, spatial controls and playback controls;
@@ -63,7 +65,7 @@ real-time rendering improvements beyond the main `master` branch:
   across devices and browsers remains part of the release checklist.
 
 The latest library validation passes 1,621 tests. Native/WASM game checks and the
-separate worker WASM check pass.
+separate DSP WASM check pass.
 Device performance gains are not yet measured. Shared piano effects and removal
 of per-note limiting can change chord dynamics. See the
 [realtime audio review](docs/realtime_audio_review.md) for details and limitations.

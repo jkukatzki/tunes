@@ -7,11 +7,10 @@ use super::commands::{AudioCommand, SoundId};
 use super::sound_pool::SoundPool;
 #[cfg(not(target_arch = "wasm32"))]
 use super::streaming::StreamingSound;
-use crate::synthesis::simd::{SimdWidth, SIMD};
 use crate::synthesis::spatial::{calculate_spatial_with_cone, ListenerConfig, SpatialParams, Vec3};
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::Ordering;
-use wide::f32x8;
+use wide::f32x4;
 
 /// Audio callback state with reusable mixing buffers
 ///
@@ -510,100 +509,13 @@ pub(crate) fn mix_sounds(
             let combined_volume = sound.volume * spatial_volume;
             let simd_num_frames = source_frames; // == num_frames when !needs_resample
 
-            match SIMD.simd_width() {
-                SimdWidth::X8 => {
-                    // Process 8 stereo frames (16 samples) at once
-                    // But only if we have enough room in the output buffer
-                    let max_frames_in_output = output.len() / 2;
-                    let safe_frames = simd_num_frames.min(max_frames_in_output);
-                    let chunks_of_16 = safe_frames / 8;
-                    let remainder_start = chunks_of_16 * 8;
-
-                    let vol_vec = f32x8::splat(combined_volume);
-                    let left_pan_vec = f32x8::splat(left_pan);
-                    let right_pan_vec = f32x8::splat(right_pan);
-
-                    // Pre-allocate temp arrays for SIMD operations (stack allocated, fast)
-                    let mut input_left = [0.0f32; 8];
-                    let mut input_right = [0.0f32; 8];
-                    let mut output_left = [0.0f32; 8];
-                    let mut output_right = [0.0f32; 8];
-
-                    for chunk_idx in 0..chunks_of_16 {
-                        let frame_start = chunk_idx * 8;
-                        let temp_start = frame_start * 2;
-                        let out_start = frame_start * 2;
-
-                        // Deinterleave input using SIMD (dispatches to AVX2/SSE/scalar)
-                        SIMD.deinterleave_stereo(
-                            &temp_buffer[temp_start..],
-                            &mut input_left,
-                            &mut input_right,
-                        );
-
-                        // Deinterleave output using SIMD
-                        SIMD.deinterleave_stereo(
-                            &output[out_start..],
-                            &mut output_left,
-                            &mut output_right,
-                        );
-
-                        // Load into SIMD vectors for processing
-                        let left = f32x8::from(input_left);
-                        let right = f32x8::from(input_right);
-                        let out_left = f32x8::from(output_left);
-                        let out_right = f32x8::from(output_right);
-
-                        // Apply volume and pan
-                        let left_out = left * vol_vec * left_pan_vec;
-                        let right_out = right * vol_vec * right_pan_vec;
-
-                        // Add (mix)
-                        let mixed_left = out_left + left_out;
-                        let mixed_right = out_right + right_out;
-
-                        // Store back to arrays
-                        output_left = mixed_left.to_array();
-                        output_right = mixed_right.to_array();
-
-                        // Interleave and store using SIMD (dispatches to AVX2/SSE/scalar)
-                        SIMD.interleave_stereo(
-                            &output_left,
-                            &output_right,
-                            &mut output[out_start..],
-                        );
-                    }
-
-                    // Handle remainder frames with scalar code
-                    for frame_idx in remainder_start..simd_num_frames {
-                        let temp_idx = frame_idx * 2;
-                        let out_idx = frame_idx * 2;
-
-                        if temp_idx + 1 < temp_buffer.len() && out_idx + 1 < output.len() {
-                            let left = temp_buffer[temp_idx] * combined_volume * left_pan;
-                            let right = temp_buffer[temp_idx + 1] * combined_volume * right_pan;
-
-                            output[out_idx] += left;
-                            output[out_idx + 1] += right;
-                        }
-                    }
-                }
-                _ => {
-                    // Fallback: scalar path
-                    for frame_idx in 0..simd_num_frames {
-                        let temp_idx = frame_idx * 2;
-                        let out_idx = frame_idx * 2;
-
-                        let left = temp_buffer[temp_idx] * combined_volume * left_pan;
-                        let right = temp_buffer[temp_idx + 1] * combined_volume * right_pan;
-
-                        if out_idx + 1 < output.len() {
-                            output[out_idx] += left;
-                            output[out_idx + 1] += right;
-                        }
-                    }
-                }
-            }
+            mix_stereo_add(
+                &mut output[..simd_num_frames * 2],
+                &temp_buffer[..simd_num_frames * 2],
+                combined_volume,
+                left_pan,
+                right_pan,
+            );
         } else {
             // Scalar path: fade active, mono output, or resampling needed.
             // When needs_resample, reads source frames with linear interpolation.
@@ -740,5 +652,55 @@ pub(crate) fn mix_streaming_sounds(
     // Remove finished streams from the dense pool.
     for id in finished_streams.iter() {
         streaming_sounds.remove(*id);
+    }
+}
+
+/// Mix directly in interleaved layout: [L, R, L, R]. Avoid channel shuffles and
+/// runtime ISA dispatch inside every voice. `wide` selects the target's SIMD
+/// implementation (including wasm simd128), with a portable scalar fallback.
+fn mix_stereo_add(output: &mut [f32], input: &[f32], volume: f32, left: f32, right: f32) {
+    debug_assert_eq!(output.len(), input.len());
+    debug_assert_eq!(output.len() % 2, 0);
+    let volume_vec = f32x4::splat(volume);
+    let pan = f32x4::from([left, right, left, right]);
+    let mut out_chunks = output.chunks_exact_mut(4);
+    let mut in_chunks = input.chunks_exact(4);
+    for (out, samples) in out_chunks.by_ref().zip(in_chunks.by_ref()) {
+        let source = f32x4::from(<[f32; 4]>::try_from(samples).unwrap());
+        let previous = f32x4::from(<[f32; 4]>::try_from(&*out).unwrap());
+        // Keep the original multiplication order for PCM compatibility.
+        out.copy_from_slice(&(previous + source * volume_vec * pan).to_array());
+    }
+    for (channel, (out, sample)) in out_chunks
+        .into_remainder()
+        .iter_mut()
+        .zip(in_chunks.remainder())
+        .enumerate()
+    {
+        *out += sample * volume * if channel == 0 { left } else { right };
+    }
+}
+
+#[cfg(test)]
+mod interleaved_tests {
+    use super::mix_stereo_add;
+
+    #[test]
+    fn interleaved_mix_matches_scalar_bits_including_partial_vectors() {
+        for frames in [0, 1, 2, 3, 127, 128, 129, 512] {
+            let source: Vec<_> = (0..frames * 2).map(|i| (i as f32 * 1.79).sin()).collect();
+            for (volume, left, right) in [(0.0, 1.0, 0.0), (0.71, 0.3, 0.9), (-0.4, 1.0, 1.0)] {
+                let mut actual = vec![0.125; source.len()];
+                let mut expected = actual.clone();
+                for (i, (out, sample)) in expected.iter_mut().zip(&source).enumerate() {
+                    *out += sample * volume * if i % 2 == 0 { left } else { right };
+                }
+                mix_stereo_add(&mut actual, &source, volume, left, right);
+                assert_eq!(
+                    actual.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                    expected.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+                );
+            }
+        }
     }
 }

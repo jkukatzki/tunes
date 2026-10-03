@@ -1,9 +1,9 @@
 const queueUrl = new URL("./command-queue.mjs", import.meta.url);
 queueUrl.search = new URL(import.meta.url).search;
 const { AudioCommandQueue } = await import(queueUrl.href);
-const adaptiveUrl = new URL("./adaptive-buffer.mjs", import.meta.url);
-adaptiveUrl.search = new URL(import.meta.url).search;
-const { AdaptiveBuffer } = await import(adaptiveUrl.href);
+const restartUrl = new URL("./audio-restart.mjs", import.meta.url);
+restartUrl.search = new URL(import.meta.url).search;
+const { restartableAudio } = await import(restartUrl.href);
 const releaseNames = new Set([
   "FadeOut",
   "Stop",
@@ -28,134 +28,48 @@ const parameterNames = new Set([
 const emptySamples = new Float32Array(0);
 
 export async function createWorkerAudio({
-  onHealth = () => {},
-  diagnostics = false,
-  bufferBlocks = 4,
-  adaptiveBuffering = false,
-  bufferingPolicy = "balanced",
+  onHealth,
+  backend = "worklet",
+  muted = false,
+  signal,
   context = new AudioContext({ latencyHint: "interactive" }),
 } = {}) {
-  if (!Number.isInteger(bufferBlocks) || bufferBlocks < 4 || bufferBlocks > 32)
-    throw new RangeError("bufferBlocks must be an integer from 4 to 32");
-  let blockFrames = 512,
-    requestedBlockFrames = 512;
-  const adaptation = adaptiveBuffering
-    ? new AdaptiveBuffer(bufferBlocks, context.sampleRate, bufferingPolicy)
-    : undefined;
-  let lastLog = performance.now(),
-    lastClock = context.currentTime;
-  let lastFrames = 0,
-    lastUnderruns = 0,
-    lastRejected = 0;
-  let renders = 0,
-    renderMs = 0,
-    maxRender = 0,
-    maxGap = 0,
-    maxCallback = 0,
-    maxBatch = 0;
-  let rejected = 0,
-    timingReports = 0;
-  const report = (data) => {
-    onHealth(data);
-    if (data.type === "health" && adaptation) {
-      const decision = adaptation.observe(
-        data,
-        !document.hidden && context.state === "running",
-      );
-      if (decision) {
-        bufferBlocks = decision.blocks;
-        worker.postMessage({ type: "buffer-target", bufferBlocks });
-        console.info(
-          "[tunes] Audio buffering " +
-            JSON.stringify({
-              ...decision,
-              capacityMs: Math.round(
-                ((bufferBlocks * blockFrames) / context.sampleRate) * 1000,
-              ),
-            }),
-        );
-      }
-    }
-    if (!diagnostics) return;
-    if (data.type === "timing") {
-      timingReports++;
-      renders += data.windowRenders || 0;
-      renderMs += data.windowRenderMs || 0;
-      maxRender = Math.max(maxRender, data.windowMaxRenderMs || 0);
-      maxGap = Math.max(maxGap, data.maxRenderGapMs || 0);
-      maxCallback = Math.max(maxCallback, data.maxCallbackMs || 0);
-      maxBatch = Math.max(maxBatch, data.maxBatchMs || 0);
-      rejected = data.rejected;
-    }
-    const now = performance.now();
-    if (data.type !== "health" || now - lastLog < 5000) return;
-    const frames = data.renderedFrames - lastFrames;
-    const underruns = data.underrunFrames - lastUnderruns;
-    const round = (n) => Math.round(n * 100) / 100;
-    const details = {
-      state: context.state,
-      hidden: document.hidden,
-      sampleRate: context.sampleRate,
-      wallMs: round(now - lastLog),
-      audioClockMs: round((context.currentTime - lastClock) * 1000),
-      outputMs: round((frames / context.sampleRate) * 1000),
-      underrunMs: round((underruns / context.sampleRate) * 1000),
-      underrunPercent: round(frames ? (underruns / frames) * 100 : 0),
-      queuedBlocks: data.queuedBlocks,
-      bufferBlocks,
-      blockFrames,
-      adaptiveBuffering,
-      bufferingPolicy: adaptation?.policy ?? bufferingPolicy,
-      bufferCapacityMs: round(
-        ((bufferBlocks * blockFrames) / context.sampleRate) * 1000,
-      ),
-      blockBudgetMs: round((blockFrames / context.sampleRate) * 1000),
-      timingReports,
-      renders,
-      meanRenderMs: round(renders ? renderMs / renders : 0),
-      maxRenderMs: round(maxRender),
-      maxCallbackMs: round(maxCallback),
-      maxRenderGapMs: round(maxGap),
-      maxCommandBatchMs: round(maxBatch),
-      rejectedCommands: rejected - lastRejected,
-    };
-    console[underruns ? "warn" : "info"](
-      "[tunes] Audio diagnostics " + JSON.stringify(details),
-    );
-    lastLog = now;
-    lastClock = context.currentTime;
-    lastFrames = data.renderedFrames;
-    lastUnderruns = data.underrunFrames;
-    lastRejected = rejected;
-    renders =
-      renderMs =
-      maxRender =
-      maxGap =
-      maxCallback =
-      maxBatch =
-      timingReports =
-        0;
-  };
-  const resetAdaptation = () => adaptation?.reset();
+  if (backend !== "worklet") throw new Error("Only AudioWorklet output is supported");
+  const blockFrames = 128;
+  const report = data => onHealth?.(data);
   const asset = (name) => {
     const url = new URL(name, import.meta.url);
     url.search = new URL(import.meta.url).search;
     return url;
   };
-  let worker;
+  const playbackRequests = new Map();
+  let playbackRequestId = 0;
+  const playbackRequest = (type, fields) => new Promise((resolve, reject) => {
+    const request = ++playbackRequestId;
+    const timer = setTimeout(() => { playbackRequests.delete(request); reject(new Error("Playback handoff timed out")); }, 3000);
+    playbackRequests.set(request, data => { clearTimeout(timer); resolve(data.snapshot); });
+    if (queue.enqueue({ kind: type, session, request, ...fields }, { critical: true }) === false) {
+      clearTimeout(timer);
+      playbackRequests.delete(request);
+      reject(new Error("Playback handoff queue full"));
+    }
+  });
+  let endpoint;
+  let outputGain;
   let node,
     timer,
     closed = false,
     fatal = false,
     session = 0,
     uploadPending = false;
+  let commandError = null;
   let monitorSamples = emptySamples;
   const playing = new Map();
   const pcmCache = new Map();
   let pcmBytes = 0;
   const queue = new AudioCommandQueue(
     (packets) => {
-      worker.postMessage(
+      endpoint.postMessage(
         { type: "batch", packets },
         packets.filter((p) => p.samples).map((p) => p.samples.buffer),
       );
@@ -166,9 +80,9 @@ export async function createWorkerAudio({
     fatal = true;
     queue.clear();
     playing.clear();
-    worker?.terminate();
+    endpoint?.terminate();
     void context.suspend().catch(() => {});
-    console.error("[tunes] Audio worker failed:", message);
+    console.error("[tunes] Audio worklet failed:", message);
     report({ type: "error", message });
   };
   function updateStatus(data) {
@@ -179,47 +93,65 @@ export async function createWorkerAudio({
     if (data.samples) monitorSamples = data.samples;
   }
   try {
-    document.addEventListener("visibilitychange", resetAdaptation);
-    context.addEventListener?.("statechange", resetAdaptation);
     const resumed = context.resume();
-    // Avoid an unhandled rejection while loading the worker module.
+    // Avoid an unhandled rejection while loading the audio module.
     void resumed.catch(() => {});
     if (navigator.audioSession) navigator.audioSession.type = "playback";
-    await context.audioWorklet.addModule(asset("./output-worklet.js"));
-    node = new AudioWorkletNode(context, "tunes-output", {
+    const response = await fetch(asset("./tunes_web_dsp_bg.wasm"), { signal });
+    if (!response.ok) throw new Error(`DSP WASM download failed (${response.status})`);
+    const directModule = await WebAssembly.compile(await response.arrayBuffer());
+    if (signal?.aborted) throw new Error("Audio preparation cancelled");
+    await context.audioWorklet.addModule(asset("./dsp-worklet.js"));
+    if (signal?.aborted) throw new Error("Audio preparation cancelled");
+    node = new AudioWorkletNode(context, "tunes-dsp", {
       numberOfInputs: 0,
       numberOfOutputs: 1,
       outputChannelCount: [2],
-      processorOptions: { bufferBlocks: adaptiveBuffering ? 32 : bufferBlocks },
     });
-    node.onprocessorerror = () =>
-      fail("AudioWorklet processor stopped; reload to restart audio");
-    node.port.onmessage = ({ data }) => {
-      if (data.type === "health") node.port.postMessage({ type: "health-ack" });
-      report(data);
-    };
-    const channel = new MessageChannel();
-    node.port.postMessage({ type: "connect", port: channel.port1 }, [
-      channel.port1,
-    ]);
     await new Promise((resolve, reject) => {
       // Create and attach handlers together so module-load failures cannot be lost.
-      worker = new Worker(asset("./worker.js"), { type: "module" });
-      let startupStage = "starting worker module";
+      {
+        // Keep the command bridge unchanged, using the worklet port as its endpoint.
+        endpoint = {
+          postMessage: (message, transfer = []) =>
+            node.port.postMessage(message, transfer),
+          terminate: () => {
+            node.port.postMessage({ type: "close" });
+            node.disconnect();
+          },
+        };
+        node.port.onmessage = (event) => {
+          if (event.data.type === "entropy-needed") {
+            const bytes = crypto.getRandomValues(new Uint8Array(65536));
+            node.port.postMessage({ type: "entropy", bytes }, [bytes.buffer]);
+          } else if (event.data.type === "health") {
+            node.port.postMessage({ type: "health-ack" });
+            report(event.data);
+          } else endpoint.onmessage?.(event);
+        };
+        node.port.onmessageerror = (event) => endpoint.onmessageerror?.(event);
+        node.onprocessorerror = () =>
+          endpoint.onerror?.({ message: "Direct DSP AudioWorklet stopped" });
+      }
+      let startupStage = "starting audio worklet";
       timer = setTimeout(
         () =>
           reject(
-            new Error(`DSP worker initialization timed out (${startupStage})`),
+            new Error(`DSP worklet initialization timed out (${startupStage})`),
           ),
         30000,
       );
-      worker.onerror = (event) =>
+      endpoint.onerror = (event) =>
         reject(
-          new Error(event.message || `DSP worker failed (${startupStage})`),
+          new Error(event.message || `DSP worklet failed (${startupStage})`),
         );
-      worker.onmessageerror = () =>
-        reject(new Error("DSP worker startup message could not be decoded"));
-      worker.onmessage = ({ data }) => {
+      endpoint.onmessageerror = () =>
+        reject(new Error("DSP worklet startup message could not be decoded"));
+      endpoint.onmessage = ({ data }) => {
+      if (data.type === "playback-reply") {
+        playbackRequests.get(data.request)?.(data);
+        playbackRequests.delete(data.request);
+      }
         if (data.type === "startup") {
           startupStage = data.stage;
           console.info("[tunes] DSP startup:", startupStage);
@@ -235,69 +167,70 @@ export async function createWorkerAudio({
         }
         if (data.type === "fatal") reject(new Error(data.message));
       };
-      worker.postMessage(
+      endpoint.postMessage(
         {
           type: "init",
+          held: muted,
+          telemetry: typeof onHealth === "function",
           sampleRate: context.sampleRate,
-          bufferBlocks,
-          maxBufferBlocks: adaptiveBuffering ? 32 : bufferBlocks,
-          wasmUrl: asset("./tunes_web_dsp_bg.wasm").href,
-          port: channel.port2,
+          module: directModule,
+          entropy: crypto.getRandomValues(new Uint8Array(65536)),
         },
-        [channel.port2],
+        [],
       );
     });
+    if (signal?.aborted) throw new Error("Audio preparation cancelled");
     clearTimeout(timer);
-    worker.onmessage = ({ data }) => {
-      if (data.type === "block-frames-ready") {
-        blockFrames = data.frames;
-        adaptation?.setBlockFrames(blockFrames);
-        if (adaptation && adaptation.blocks !== bufferBlocks) {
-          bufferBlocks = adaptation.blocks;
-          worker.postMessage({ type: "buffer-target", bufferBlocks });
-        }
-        console.info("[tunes] DSP block size:", blockFrames);
+    endpoint.onmessage = ({ data }) => {
+      if (data.type === "playback-reply") {
+        playbackRequests.get(data.request)?.(data);
+        playbackRequests.delete(data.request);
       }
       if (data.type === "ack") {
         updateStatus(data);
-        if (data.errors?.length)
-          console.warn("[tunes] Worker command rejected:", data.errors);
+        if (data.errors?.length) {
+          commandError = data.errors.join("; ");
+          console.warn("[tunes] Audio command rejected:", data.errors);
+        }
         queue.ack();
       }
       if (data.type === "status") {
         updateStatus(data);
-        worker.postMessage({ type: "status-ack" });
+        endpoint.postMessage({ type: "status-ack" });
       }
       if (data.type === "timing") {
-        worker.postMessage({ type: "timing-ack" });
+        endpoint.postMessage({ type: "timing-ack" });
         report(data);
       }
       if (data.type === "sample-ready") uploadPending = false;
       if (data.type === "fatal") fail(data.message);
     };
     // Startup reports may already have been delivered to the temporary handler.
-    worker.postMessage({ type: "status-ack" });
-    worker.postMessage({ type: "timing-ack" });
-    worker.onerror = (event) => fail(event.message);
-    worker.onmessageerror = () =>
-      fail("DSP worker message could not be decoded");
-    node.connect(context.destination);
+    endpoint.postMessage({ type: "status-ack" });
+    endpoint.postMessage({ type: "timing-ack" });
+    endpoint.onerror = (event) => fail(event.message);
+    endpoint.onmessageerror = () =>
+      fail("DSP worklet message could not be decoded");
+    if (muted) {
+      outputGain = context.createGain();
+      outputGain.gain.value = 0;
+      node.connect(outputGain);
+      outputGain.connect(context.destination);
+    } else node.connect(context.destination);
     // Activation may have been lost during download; gestures below retry it.
     void resumed.catch((error) =>
       console.info("[tunes] Audio awaits a gesture:", error),
     );
   } catch (error) {
-    document.removeEventListener("visibilitychange", resetAdaptation);
-    context.removeEventListener?.("statechange", resetAdaptation);
     clearTimeout(timer);
-    worker?.terminate();
+    endpoint?.terminate();
     node?.disconnect();
-    await context.close();
+    void context.close().catch(console.warn);
     throw error;
   }
   const valid = (s) => !closed && !fatal && s === session;
   function attach() {
-    if (closed || fatal) throw new Error("DSP worker unavailable");
+    if (closed || fatal) throw new Error("DSP worklet unavailable");
     session++;
     playing.clear();
     pcmCache.clear();
@@ -351,47 +284,146 @@ export async function createWorkerAudio({
     if (seq !== false && packet.playId) playing.set(id, seq);
     return seq !== false;
   }
+  let pageHidden = document.hidden;
+  let lifecycleEpoch = 0;
+  let recoveryTimer;
+  let needsRecovery = false;
+  let cycling = false;
+  const foreground = () => !closed && !fatal && !pageHidden && !document.hidden;
+  const sessionType = (type) => {
+    try {
+      if (navigator.audioSession) navigator.audioSession.type = type;
+    } catch (error) {
+      console.warn("[tunes] Audio session update failed", error);
+    }
+  };
+  const suspendHidden = () => {
+    void context.suspend().then(() => {
+      // A slow suspend may finish after pageshow/resume.
+      if (foreground()) resumeForeground();
+    }).catch(console.warn);
+  };
+  const resumeForeground = () => {
+    if (!foreground()) return;
+    sessionType("playback");
+    // Call synchronously so a trusted gesture can unlock Safari audio.
+    void context.resume().then(() => {
+      // Conversely, an old resume must not restart hidden playback.
+      if (!closed && !fatal && !foreground()) suspendHidden();
+    }).catch((error) => console.warn("[tunes] Audio resume failed", error));
+  };
+  const probe = (retry = true) => {
+    clearTimeout(recoveryTimer);
+    const epoch = lifecycleEpoch;
+    const clock = context.currentTime;
+    recoveryTimer = setTimeout(() => {
+      recoveryTimer = undefined;
+      if (epoch !== lifecycleEpoch || !foreground()) return;
+      const delta = context.currentTime - clock;
+      if (context.state === "running" && delta > 0.01) {
+        needsRecovery = false;
+        console.info("[tunes] Foreground audio resumed", { backend, clockDelta: delta });
+        return;
+      }
+      needsRecovery = true;
+      if (!retry) {
+        console.warn("[tunes] Foreground audio stalled; tap to retry", { state: context.state });
+        return;
+      }
+      console.warn("[tunes] Recovering foreground audio", { state: context.state, clockDelta: delta });
+      if (context.state === "running") {
+        cycling = true;
+        void context.suspend().then(() => {
+          cycling = false;
+          if (!foreground()) return;
+          resumeForeground();
+          if (epoch === lifecycleEpoch) probe(false);
+        }).catch((error) => {
+          cycling = false;
+          console.warn("[tunes] Foreground audio recovery failed", error);
+        });
+      } else {
+        resumeForeground();
+        probe(false);
+      }
+    }, 600);
+  };
   const hide = () => {
-    void context.suspend().catch(console.warn);
-    if (navigator.audioSession) navigator.audioSession.type = "auto";
+    pageHidden = true;
+    lifecycleEpoch++;
+    needsRecovery = true;
+    clearTimeout(recoveryTimer);
+    recoveryTimer = undefined;
+    suspendHidden();
+    sessionType("auto");
   };
   const visibility = () => {
-    if (document.hidden) {
-      hide();
-    } else {
-      if (navigator.audioSession) navigator.audioSession.type = "playback";
-      if (!fatal) void context.resume().catch(console.warn);
+    if (document.hidden) hide();
+    else {
+      pageHidden = false;
+      lifecycleEpoch++;
+      needsRecovery = true;
+      resumeForeground();
+      probe();
     }
   };
   const gesture = () => {
-    if (!document.hidden && !fatal && context.state !== "running")
-      void context.resume().catch(() => {});
+    if (!foreground()) return;
+    if (needsRecovery || context.state !== "running") {
+      resumeForeground();
+      if (recoveryTimer === undefined && !cycling) probe();
+    }
   };
+  const stateChanged = () => {
+    if (closed || fatal) return;
+    if (!foreground()) {
+      if (context.state === "running") suspendHidden();
+    } else if (!cycling && context.state !== "running" && context.state !== "closed") {
+      needsRecovery = true;
+      resumeForeground();
+      if (recoveryTimer === undefined) probe();
+    }
+  };
+  context.addEventListener?.("statechange", stateChanged);
   document.addEventListener("visibilitychange", visibility, true);
   window.addEventListener("pagehide", hide, true);
   window.addEventListener("pageshow", visibility, true);
   window.addEventListener("pointerup", gesture, true);
   window.addEventListener("touchend", gesture, true);
   window.addEventListener("keydown", gesture, true);
+  if (pageHidden) hide();
   return {
     sampleRate: context.sampleRate,
     bufferStatus() {
       return {
-        blocks: bufferBlocks,
+        backend,
         blockFrames,
-        adaptive: adaptiveBuffering,
-        policy: adaptation?.policy ?? bufferingPolicy,
+        baseLatency: context.baseLatency ?? null,
+        outputLatency: context.outputLatency ?? null,
       };
     },
-    setBlockFrames(frames) {
-      if (![512, 1024, 2048, 4096, 8192].includes(frames))
-        throw new RangeError("Invalid DSP block size");
-      if (requestedBlockFrames === frames || closed || fatal) return;
-      requestedBlockFrames = frames;
-      worker.postMessage({ type: "block-frames", frames });
+    capturePlayback: ids => playbackRequest("playback-snapshot", { ids }),
+    restorePlayback: snapshot => playbackRequest("restore-playback", { snapshot }),
+    releasePlayback() { endpoint.postMessage({ type: "release-playback", cancelThrough: playbackRequestId }); },
+    deactivate() { node.disconnect(); },
+    activate() {
+      endpoint.postMessage({ type: "release-playback", cancelThrough: playbackRequestId });
+      if (outputGain) outputGain.gain.value = 1;
+      if (foreground()) resumeForeground();
     },
-    setBufferingPolicy(policy) {
-      adaptation?.setPolicy(policy);
+    restoreSession(value) {
+      session = value - 1;
+      attach();
+    },
+    async drain() {
+      const deadline = performance.now() + 10000;
+      while (queue.busy || queue.pending.length) {
+        if (commandError) throw new Error(commandError);
+        if (closed || fatal || performance.now() > deadline)
+          throw new Error("Audio restoration timed out or failed");
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      if (commandError || closed || fatal) throw new Error(commandError ?? "Audio unavailable");
     },
     attach,
     wire,
@@ -466,14 +498,17 @@ export async function createWorkerAudio({
       )
         return false;
       uploadPending = true;
-      worker.postMessage({ type: "sample", id, sampleRate, samples }, [
+      endpoint.postMessage({ type: "sample", id, sampleRate, samples }, [
         samples.buffer,
       ]);
       return true;
     },
-    async close() {
+    async close({ preserveSession = false } = {}) {
       if (closed) return;
       closed = true;
+      lifecycleEpoch++;
+      clearTimeout(recoveryTimer);
+      context.removeEventListener?.("statechange", stateChanged);
       queue.clear();
       playing.clear();
       document.removeEventListener("visibilitychange", visibility, true);
@@ -482,11 +517,10 @@ export async function createWorkerAudio({
       window.removeEventListener("pointerup", gesture, true);
       window.removeEventListener("touchend", gesture, true);
       window.removeEventListener("keydown", gesture, true);
-      worker?.terminate();
-      document.removeEventListener("visibilitychange", resetAdaptation);
-      context.removeEventListener?.("statechange", resetAdaptation);
+      endpoint?.terminate();
       node.disconnect();
-      if (navigator.audioSession) navigator.audioSession.type = "auto";
+      outputGain?.disconnect();
+      if (!preserveSession && navigator.audioSession) navigator.audioSession.type = "auto";
       await context.close();
     },
   };
@@ -497,23 +531,31 @@ let installing = false;
 export async function installWorkerAudio(options) {
   if (installing || globalThis.__tunesWorkerAttach)
     throw new Error(
-      "Tunes worker audio is already installed; close it before installing another",
+      "Tunes audio is already installed; close it before installing another",
     );
   installing = true;
   let audio;
   try {
-    audio = await createWorkerAudio(options);
+    const initial = await createWorkerAudio({
+      ...options,
+      context: options?.context ?? new AudioContext({ latencyHint: options?.latencyHint ?? "interactive" }),
+    });
+    audio = restartableAudio(initial, async (latencyHint, sampleRate, signal) => {
+      const context = new AudioContext({ latencyHint, sampleRate });
+      const cancel = () => { void context.close().catch(console.warn); };
+      signal.addEventListener('abort', cancel, { once: true });
+      try { return await createWorkerAudio({ ...options, context, muted: true, signal }); }
+      finally { signal.removeEventListener('abort', cancel); }
+    }, options?.latencyHint ?? "interactive");
   } finally {
     installing = false;
   }
   const bindings = {
+    __tunesAudioLatencyHint: value => audio.setLatencyHint(value),
+    __tunesAudioPreferenceStatus: () => audio.preferenceStatus(),
     __tunesWorkerAttach: () => audio.attach(),
+    __tunesAudioOutputLatency: () => audio.bufferStatus().outputLatency,
     __tunesWorkerRate: () => audio.sampleRate,
-    __tunesWorkerBufferBlocks: () => audio.bufferStatus().blocks,
-    __tunesWorkerBufferAdaptive: () => audio.bufferStatus().adaptive,
-    __tunesWorkerBlockFrames: () => audio.bufferStatus().blockFrames,
-    __tunesWorkerSetBlockFrames: (frames) => audio.setBlockFrames(frames),
-    __tunesWorkerBufferPolicy: (policy) => audio.setBufferingPolicy(policy),
     __tunesWorkerSend: (s, json) => audio.wire(s, json),
     __tunesWorkerPcm: (s, key, pcm) => audio.pcm(s, key, pcm),
     __tunesWorkerRemovePcm: (s, key) => audio.removePcm(s, key),
@@ -532,10 +574,12 @@ export async function installWorkerAudio(options) {
         if (globalThis[name] === fn) delete globalThis[name];
     }
   };
-  console.info("[tunes] Worker output ready", {
+  console.info("[tunes] AudioWorklet output ready", {
     protocol: 2,
     sampleRate: audio.sampleRate,
-    bufferedFrames: (options?.bufferBlocks ?? 4) * 512,
+    backend: audio.bufferStatus().backend,
+    bufferedFrames:
+      audio.bufferStatus().blocks * audio.bufferStatus().blockFrames,
   });
   return audio;
 }

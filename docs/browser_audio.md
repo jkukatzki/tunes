@@ -1,14 +1,15 @@
 # Browser audio
 
-This fork supports two browser outputs:
+The standalone browser bridge uses AudioWorklet only. A legacy main-thread CPAL
+constructor remains available to direct library consumers; it is not an automatic fallback:
 
 | Feature / constructor | DSP execution | Host setup |
 | --- | --- | --- |
 | `web` / `AudioEngine::with_buffer_size` | Browser main thread (CPAL) | Normal wasm-bindgen application |
-| `worker` / `AudioEngine::with_worker_output` | Separate DSP WASM in a dedicated worker | Install the JavaScript bridge first |
+| `worker` / `AudioEngine::with_worker_output` | Separate DSP WASM on the AudioWorklet thread | Install the JavaScript bridge first |
 
 Native applications continue to use `AudioEngine::new()` or `with_buffer_size()`.
-The worker backend has no dependency on Bevy, Svelte, or a particular game.
+The AudioWorklet backend has no dependency on Bevy, Svelte, or a particular game.
 
 ## Install this fork
 
@@ -78,7 +79,7 @@ let engine = tunes::engine::AudioEngine::with_worker_output()?;
 
 Keep the engine alive for playback. Only one installed bridge/active worker
 engine is supported per page. Replacing the engine resets its session and voices;
-old handles and queued PCM cannot control the replacement. `audio.close()` releases
+old handles and queued commands cannot control the replacement. `audio.close()` releases
 the worker, DOM listeners, global bindings and the AudioContext, including a
 context supplied by your application. It is safe to close twice. The older
 `installGameAudio` export remains an alias for compatibility.
@@ -89,7 +90,7 @@ The bridge suspends audio when hidden or on `pagehide`, releases the playback
 session on browsers supporting Audio Session, and resumes on foreground return.
 Pointer, touch and keyboard gestures retry activation if the browser requires it.
 Foreground playback uses the `playback` session where available for iPhone Silent
-Mode support. This is browser-dependent. Fatal worker/processor errors are logged
+Mode support. This is browser-dependent. Fatal processor errors are logged
 and reported through `onHealth`; reload to recover.
 
 The protocol supports DSP tracks, mono/stereo sample metadata and loop points,
@@ -98,18 +99,16 @@ volume/pan/rate automation, fades, pause/resume and stop. Spectral/convolution
 effects and native file streams are explicitly unsupported. The private JSON
 wire format is not a general RPC API; version and package both modules together.
 
-DSP output defaults to four transferable 512-frame stereo blocks (about 46 ms buffered
-at 44.1 kHz, plus device latency). Call `setBlockFrames(512 | 1024 | 2048 | 4096 | 8192)` to resize the DSP block
-without resetting voices. Queued packets retain their original lengths. Commands are bounded and
-coalesced with reserved release capacity and an emergency stop under overload.
+DSP runs directly on the AudioWorklet thread in 128-frame blocks. There is no
+transferable PCM output queue or browser buffer-size setting. Commands are bounded
+and coalesced with reserved release capacity and an emergency stop under overload.
 The renderer admits 96 voices with eight additional stealing fades. The game PCM
 cache is bounded at 128 allocations / 128 MiB; registration/admission may fail and
 should be handled. Arbitrarily complex graphs, decoding and uploads can still
-starve the worker. This is not a hard realtime guarantee.
+miss audio-thread deadlines. This is not a hard realtime guarantee.
 
 `recover_web_output_on_foreground()` should be called from your frame loop if you
-use a monitor callback: it delivers optional worker snapshots every four rendered
-blocks, subject to backpressure. These are visualisation samples, not continuous
+use a monitor callback: it delivers optional audio snapshots at roughly 20 Hz, subject to backpressure. These are visualisation samples, not continuous
 recording. Background lifecycle handling itself is in the JavaScript bridge.
 
 Keep the entire distribution and application WASM on the same release. The bridge
@@ -128,29 +127,67 @@ sample loading, overload and user-gesture recovery. Monitor underruns and comman
 rejections. The harness has passed an iPhone stall/resume check; this is not a
 cross-browser compatibility certification.
 
-`installWorkerAudio({ bufferBlocks: 24 })` selects a larger fixed pool to tolerate
-longer buffer-delivery gaps. Valid counts are 4–32; default is 4. At 48 kHz,
-24 blocks hold 256 ms of audio versus 42.7 ms for four. This also increases
-instrument response latency. It is a scheduling-tolerance tradeoff, not a DSP
-speed improvement. Enable `diagnostics: true` to compare interval underruns.
+## Direct DSP on the audio thread (default)
 
-Enable `adaptiveBuffering: true` to adjust the pool between 4 and 32 blocks
-without recreating the engine. `bufferBlocks` becomes the initial target. The
-controller grows after underruns. `bufferingPolicy` selects `conservative`
-(one block down after 60 clean seconds), `balanced` (two after 30, default), or
-`optimistic` (two after 10). Call `setBufferingPolicy()` to change this live;
-`bufferStatus()` reports the current target and mode. Startup/resume/adjustments have a three-second observation grace
-period; background playback is excluded. Buffers are preallocated, and downsizing
-parks them only after consumption, preserving queued PCM. Changes are logged as
-`[tunes] Audio buffering`. This observes playback conditions, not the device's
-power-saving setting directly. Persistent stalls beyond the maximum capacity can
-still cause underruns. Adaptive buffering is disabled by default in the library.
+`installWorkerAudio()` runs the same
+DSP WASM directly inside an AudioWorklet. The host compiles the module before
+installation; the worklet instantiates it synchronously. Packaging generates a
+single `dsp-worklet.js` containing the binding glue, UTF-8 support and processor,
+so dependencies share the distribution's release URL. No shared memory or
+cross-origin isolation is required.
 
-Variable-size blocks require rebuilding the DSP WASM and publishing it with the
-matching worker scripts. `bufferStatus().blockFrames` is updated when the worker
-acknowledges a size change; mixed old/new packets can remain queued briefly.
-Adaptive mode limits the target to roughly 350 ms, subject to its four-block
-minimum and 32-block maximum. The 8192-frame preset therefore has a minimum
-capacity of about 683 ms at 48 kHz. Fixed-count mode keeps the chosen count.
-Changing block sizes can allocate on the DSP worker as consumed buffers are resized;
-the AudioWorklet does not allocate PCM storage during the transition.
+This mode renders 128 frames on demand. Browser settings expose latency/power
+preferences; device-buffer presets are native-only. It removes the worker scheduling and PCM-transfer round
+trip, but does not guarantee glitch-free playback: the DSP now has to meet the
+audio thread's deadline. Four commands at most are dispatched per quantum, in
+order, with one bounded batch in flight. Large PCM registrations, effect changes,
+WASM memory growth and cleanup can still cause expensive work on that thread.
+Main-thread stalls can still delay new user input or commands.
+
+The generated binding uses bounded Web Crypto entropy supplied by the host for
+Rust RNG seeding; it never substitutes predictable randomness. The host refills
+this small pool on request. Status messages are sampled, not per-quantum PCM
+transfers. An optional `onHealth` callback enables health/timing reports.
+`callbackOverruns` measures CPU time exceeding a quantum's budget, not hardware
+dropouts. Timer resolution varies. Normal playback skips these measurements.
+
+Direct output is the only browser backend. The former dedicated-worker fallback
+and adaptive buffering controls have been removed. The historical `worker` Cargo
+feature and `installWorkerAudio` API names remain for compatibility.
+Foreground recovery checks audio-clock progress, retries once, and permits a
+user-gesture retry if still stalled. Hide/resume promise races are reconciled
+without replacing the DSP or losing loaded samples. Device verification of this
+recovery remains necessary. Use `node web-dsp/scripts/benchmark-worklet.mjs
+web-dsp/dist` for CPU and PCM-parity verification against the same DSP renderer.
+The desktop report covers 32,000 measured callbacks (sustained and repeated attacks/releases,
+1/12/48/96 voices, 44.1/48 kHz), with zero CPU-budget overruns and bit-identical output for 9,011,200
+compared samples. It does not measure Safari scheduling or physical output latency.
+
+## Changing latency preference without reloading
+
+The installed bridge exposes `setLatencyHint("interactive" | "balanced" | "playback")`.
+Changes are debounced, then a new context and muted DSP are prepared. Registered
+PCM, buses, listener controls, monitoring, and active sample playback descriptions are
+replayed before output switches. Concurrent commands are retained in a bounded
+backlog. Replay uses batches of at most 32 commands and a finite handoff point,
+so continuous listener updates cannot prevent completion. The whole attempt has
+a 15-second deadline; context closure does not delay the preference status.
+On failure, old audio remains available; `preferenceStatus()` reports
+the error and requested/applied preference. This cannot detect whether a browser
+honors the hint; `bufferStatus()` exposes reported base/output latency instead.
+
+Synthesized voices and their per-voice controls are not replayed, including notes
+played during preparation. Direct samples and sample-only tracks/mixers are
+restored automatically; mixed sample/synth graphs are dropped. No music flag is
+needed. Sample playback positions, pause state and rate/fade timelines transfer
+from the old DSP at handoff. The replacement is held during preparation so samples
+cannot finish silently. A brief handoff gap is possible; effect tails reset. This is
+not sample-exact state migration. PCM replay retains up to 128 MiB of host data
+in addition to DSP storage, and preparing the replacement temporarily uses two
+DSP instances. Sound descriptions and the change backlog are separately bounded
+to 128 MiB, with at most 512 commands in the backlog. Registration still occurs
+on the new audio thread; the old context remains the output until restoration
+finishes. No dedicated-worker output backend is involved.
+
+The raw `createWorkerAudio` diagnostic harness does not install this restart
+controller. Use `installWorkerAudio` for application ownership and live preferences.

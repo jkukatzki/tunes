@@ -43,7 +43,6 @@ impl WebAudioLifecycle {
     pub(super) fn new(stream: &cpal::Stream) -> Result<Self> {
         let cpal::platform::StreamInner::WebAudio(stream) = stream.as_inner();
         let context = stream.audio_context();
-        let stream_recovery = stream.recovery_handle();
         let window = web_sys::window().ok_or_else(|| {
             TunesError::AudioEngineError("Web audio requires a browser window".into())
         })?;
@@ -171,7 +170,6 @@ impl WebAudioLifecycle {
         let check_document = document.clone();
         let check_hidden = hidden.clone();
         let mut last_clock = context.current_time();
-        let mut last_buffers = stream_recovery.rendered_buffers();
         let check = Closure::wrap(Box::new(move || {
             if check_hidden.get()
                 || check_document.hidden()
@@ -181,28 +179,16 @@ impl WebAudioLifecycle {
                 return;
             }
             let clock = check_context.current_time();
-            let buffers = stream_recovery.rendered_buffers();
             if report_ticks.get() > 0 {
                 report_ticks.set(report_ticks.get() - 1);
                 if report_ticks.get() == 0 {
                     web_sys::console::info_1(&format!(
-                        "[tunes] Foreground audio health: state={:?}, clock_delta={:.3}s, rendered_buffers_delta={}",
-                        check_context.state(), clock - last_clock, buffers.saturating_sub(last_buffers),
+                        "[tunes] Foreground audio health: state={:?}, clock_delta={:.3}s",
+                        check_context.state(), clock - last_clock,
                     ).into());
                 }
             }
             last_clock = clock;
-            last_buffers = buffers;
-            let restarted = stream_recovery.recover_stalled();
-            if restarted > 0 {
-                web_sys::console::warn_1(
-                    &format!(
-                        "[tunes] Restarted {restarted} stalled audio buffer chain(s) at {:.3}s",
-                        check_context.current_time(),
-                    )
-                    .into(),
-                );
-            }
             let running = check_context.state() == AudioContextState::Running;
             if recovery
                 .borrow_mut()

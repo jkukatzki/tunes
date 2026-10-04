@@ -191,3 +191,12 @@ finishes. No dedicated-worker output backend is involved.
 
 The raw `createWorkerAudio` diagnostic harness does not install this restart
 controller. Use `installWorkerAudio` for application ownership and live preferences.
+
+## Reusable browser host package
+
+The Tunes checkout also provides the npm package `@tunes/browser`. It owns
+user-gesture audio unlock, foreground media-session lifetime, latency preference
+parsing, one-time WASM initialization and shared build commands. The frontend and
+u_moni Svelte wrappers use the same host package and the same DSP distribution.
+See [the package guide](../browser/README.md) for API and packaging commands.
+App-specific release caches, settings keys and UI stay in the consuming app.

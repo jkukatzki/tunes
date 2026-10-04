@@ -570,17 +570,17 @@ impl Mixer {
     /// # }
     /// ```
     pub fn import_midi(path: &str) -> Result<Self> {
-        use crate::track::Track;
-        use std::fs;
-
-        // Read MIDI file
-        let data = fs::read(path).map_err(|e| {
+        let data = std::fs::read(path).map_err(|e| {
             TunesError::MidiError(format!("Failed to read MIDI file {}: {}", path, e))
         })?;
 
-        let smf = Smf::parse(&data).map_err(|e| {
-            TunesError::MidiError(format!("Failed to parse MIDI file {}: {}", path, e))
-        })?;
+        Self::import_midi_bytes(&data)
+    }
+
+    /// Import MIDI already loaded by an HTTP or asset reader, without filesystem IO.
+    pub fn import_midi_bytes(data: &[u8]) -> Result<Self> {
+        use crate::track::Track;
+        let smf = Smf::parse(data).map_err(|e| TunesError::MidiError(format!("Failed to parse MIDI: {e}")))?;
 
         // Extract timing info (PPQ)
         let ppq = match smf.header.timing {
@@ -928,5 +928,18 @@ impl Mixer {
         }
 
         Ok(mixer)
+    }
+}
+
+#[cfg(test)]
+mod browser_import_tests {
+    use super::*;
+    #[test]
+    fn midi_bytes_import_without_a_file() {
+        // Format 0, 96 ticks/beat: middle C on, one beat, note off, end track.
+        let data = b"MThd\x00\x00\x00\x06\x00\x00\x00\x01\x00\x60MTrk\x00\x00\x00\x0c\x00\x90\x3c\x40\x60\x80\x3c\x00\x00\xff\x2f\x00";
+        let mixer = Mixer::import_midi_bytes(data).unwrap();
+        assert!(mixer.total_duration() >= 0.5);
+        assert!(Mixer::import_midi_bytes(b"not midi").is_err());
     }
 }

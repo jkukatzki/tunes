@@ -1,0 +1,34 @@
+{
+  "name": "@tunes/browser",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Browser audio and WASM startup for Tunes applications",
+  "license": "MIT OR Apache-2.0",
+  "exports": {
+    ".": {
+      "types": "./browser/index.d.ts",
+      "default": "./browser/index.js"
+    },
+    "./optimize-wasm": "./browser/optimize-wasm.mjs"
+  },
+  "bin": {
+    "tunes-build-audio": "./browser/build-audio.mjs",
+    "tunes-build-wasm": "./browser/build-wasm.mjs"
+  },
+  "files": [
+    "browser",
+    "web-dsp",
+    "src",
+    "Cargo.toml",
+    "Cargo.lock",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+    "vendor/cpal/LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test browser/*.test.mjs web-dsp/web/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

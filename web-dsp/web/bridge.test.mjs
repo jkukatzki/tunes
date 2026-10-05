@@ -47,7 +47,13 @@ async function setup(options = {}, globals = {}) {
     constructor(_context, name) {
       this.name = name;
       this.port = {
-        postMessage: (message) => {
+        postMessage: (message, transfer) => {
+          if (message.type === "init") {
+            // Model Chrome rejecting compiled modules at the receiving port.
+            assert.ok(message.module instanceof ArrayBuffer);
+            assert.equal(transfer.length, 1);
+            assert.equal(transfer[0], message.module);
+          }
           if (name === "tunes-dsp") {
             posts.push(message);
             if (message.type === "batch" && globals.autoAck) {

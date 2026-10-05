@@ -99,7 +99,12 @@ export async function createWorkerAudio({
     if (navigator.audioSession) navigator.audioSession.type = "playback";
     const response = await fetch(asset("./tunes_web_dsp_bg.wasm"), { signal });
     if (!response.ok) throw new Error(`DSP WASM download failed (${response.status})`);
-    const directModule = await WebAssembly.compile(await response.arrayBuffer());
+    // Transfer bytes: some Chrome versions reject compiled WebAssembly.Module
+    // messages at the receiving worklet port even though postMessage succeeds.
+    const wasmBytes = await response.arrayBuffer();
+    // Validate and warm the engine's compilation cache off the audio thread.
+    // Only the bytes cross the port; the compiled module stays on this side.
+    await WebAssembly.compile(wasmBytes);
     if (signal?.aborted) throw new Error("Audio preparation cancelled");
     await context.audioWorklet.addModule(asset("./dsp-worklet.js"));
     if (signal?.aborted) throw new Error("Audio preparation cancelled");
@@ -173,10 +178,10 @@ export async function createWorkerAudio({
           held: muted,
           telemetry: typeof onHealth === "function",
           sampleRate: context.sampleRate,
-          module: directModule,
+          module: wasmBytes,
           entropy: crypto.getRandomValues(new Uint8Array(65536)),
         },
-        [],
+        [wasmBytes],
       );
     });
     if (signal?.aborted) throw new Error("Audio preparation cancelled");

@@ -17,6 +17,7 @@ const output = join(temporary, 'optimized.wasm');
 try {
 	const args = [file, level, '--enable-reference-types', '--strip-debug', '--strip-producers', '-o', output];
 	if ((process.env.WASM_SIMD || '1') === '1') args.push('--enable-simd');
+	if (process.env.WASM_THREADS === '1') args.push('--enable-threads', '--enable-bulk-memory');
 	if (process.env.WASM_OPT_CONVERGE === '1') args.push('--converge');
 	console.log(`Optimizing WASM with ${optimizer} ${level} ...`);
 	const result = spawnSync(optimizer, args, { stdio: 'inherit' });

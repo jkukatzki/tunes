@@ -150,3 +150,13 @@ test("normal playback keeps status updates but skips timing and health reports",
   assert.ok(posts.some(p => p.type === 'status'));
   assert.ok(!posts.some(p => p.type === 'health' || p.type === 'timing'));
 });
+
+
+test("incoming message decode failures report a fatal error instead of hanging startup", () => {
+  const { processor, posts, process } = setup();
+  processor.port.onmessageerror();
+  assert.equal(posts.at(-1).type, "fatal");
+  assert.match(posts.at(-1).message, /could not decode/);
+  assert.equal(processor.failed, true);
+  assert.ok(process().every(channel => channel.every(sample => sample === 0)));
+});

@@ -34,6 +34,8 @@ export function createDspProcessor({
       this.maxCallbackMs = 0;
       this.callbackOverruns = 0;
       this.rejected = 0;
+      this.port.onmessageerror = () =>
+        this.fail(new Error("DSP worklet could not decode an incoming message"));
       this.port.onmessage = ({ data }) => {
         try {
           if (data.type === "init" && !this.dsp) {
@@ -42,6 +44,7 @@ export function createDspProcessor({
                 this.port.postMessage({ type: "entropy-needed" });
               entropy.add(data.entropy);
             }
+            this.port.postMessage({ type: "startup", stage: "initializing DSP WASM" });
             const wasm = initSync({ module: data.module });
             this.memory = wasm.memory;
             this.dsp = new DspWorker(rate);
@@ -57,6 +60,7 @@ export function createDspProcessor({
               );
             this.dsp.set_block_frames(128);
             this.render = createBlockRenderer(this.dsp, wasm.memory);
+            this.port.postMessage({ type: "startup", stage: "warming DSP buffers" });
             // Initialize lazy tables/buffers before connecting to the output.
             this.render();
             this.dsp.collect_garbage_budget(4);

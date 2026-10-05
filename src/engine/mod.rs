@@ -202,7 +202,7 @@ impl AudioEngine {
     /// Create a persistent post-voice effect route. Its handle owns its lifetime.
     pub fn create_effect_bus(&self, effects: BusEffects) -> Result<EffectBus> {
         self.effect_bus_slots
-            .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |count| {
+            .try_update(Ordering::AcqRel, Ordering::Relaxed, |count| {
                 (count < 16).then_some(count + 1)
             })
             .map_err(|_| TunesError::AudioEngineError("Maximum 16 effect buses reached".into()))?;

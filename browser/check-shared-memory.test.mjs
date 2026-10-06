@@ -18,7 +18,16 @@ test('accepts a module that really requires shared imported memory', () => {
     env: { memory: new WebAssembly.Memory({ initial: 1, maximum: 2, shared: true }) }
   });
   assert.ok(instance);
-  assert.doesNotThrow(() => assertSharedMemory(bytes));
+  assert.deepEqual(assertSharedMemory(bytes), { initial: 1, maximum: 2, shared: true });
+});
+
+test('a smaller imported maximum works and preserves sharing between instances', () => {
+  const module = new WebAssembly.Module(fixture(true, true));
+  const memory = new WebAssembly.Memory({ initial: 1, maximum: 1, shared: true });
+  assert.ok(new WebAssembly.Instance(module, { env: { memory } }));
+  assert.ok(new WebAssembly.Instance(module, { env: { memory } }));
+  assert.ok(memory.buffer instanceof SharedArrayBuffer);
+  assert.throws(() => memory.grow(1), RangeError);
 });
 
 for (const [shared, imported] of [[false, false], [false, true], [true, false]]) {

@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 
 // Inspect only import/memory sections; never instantiate or execute the game.
+/** @param {Uint8Array} bytes */
 export function assertSharedMemory(bytes) {
   let offset = 0;
   const byte = () => {
@@ -21,9 +22,9 @@ export function assertSharedMemory(bytes) {
   const limits = () => {
     const flags = uint();
     if (flags & ~3) throw new Error('Unsupported WASM memory/table limits');
-    uint();
-    if (flags & 1) uint();
-    return flags;
+    const initial = uint();
+    const maximum = flags & 1 ? uint() : undefined;
+    return { flags, initial, maximum };
   };
   const reference = () => {
     const type = byte();
@@ -43,7 +44,7 @@ export function assertSharedMemory(bytes) {
         switch (byte()) {
           case 0: uint(); break; // function
           case 1: reference(); limits(); break; // table
-          case 2: memories.push({ imported: true, flags: limits() }); break;
+          case 2: memories.push({ imported: true, ...limits() }); break;
           case 3: reference(); byte(); break; // global
           case 4: byte(); uint(); break; // exception tag
           default: throw new Error('Unsupported WASM import kind');
@@ -51,7 +52,7 @@ export function assertSharedMemory(bytes) {
       }
     } else if (section === 5) {
       const count = uint();
-      for (let i = 0; i < count; i++) memories.push({ imported: false, flags: limits() });
+      for (let i = 0; i < count; i++) memories.push({ imported: false, ...limits() });
     }
     if (offset > end) throw new Error('Invalid WASM section length');
     offset = end;
@@ -59,8 +60,14 @@ export function assertSharedMemory(bytes) {
   if (memories.length !== 1 || !memories[0].imported || memories[0].flags !== 3) {
     throw new Error('Threaded game must import shared WASM memory with a maximum; check --shared-memory, --import-memory and --max-memory linker flags');
   }
+  const { initial, maximum } = memories[0];
+  if (maximum === undefined || initial > maximum || maximum > 65536) {
+    throw new Error('Invalid shared wasm32 memory limits');
+  }
+  return { initial, maximum, shared: true };
 }
 
+/** @param {string} path */
 export function checkSharedMemoryFile(path) {
   assertSharedMemory(readFileSync(path));
   console.info(`[WASM] Verified imported shared memory: ${path}`);

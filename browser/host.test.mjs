@@ -64,3 +64,49 @@ test('WASM HTTP errors fail before compilation', async t => {
   assert.ok(await downloadWasm('/app.wasm', p => updates.push(p)) instanceof WebAssembly.Module);
   assert.equal(updates.at(-1).loaded, 8);
 });
+
+test('WASM streams into the compiler with progress even with a generic server MIME type', async t => {
+  const fetch = globalThis.fetch;
+  const compile = WebAssembly.compile;
+  t.after(() => { globalThis.fetch = fetch; WebAssembly.compile = compile; });
+  WebAssembly.compile = () => { throw new Error('Must not buffer the complete module'); };
+  const chunks = [new Uint8Array([0, 97, 115, 109]), new Uint8Array([1, 0, 0, 0])];
+  globalThis.fetch = async () => new Response(new ReadableStream({
+    pull(controller) {
+      if (chunks.length) controller.enqueue(chunks.shift());
+      else controller.close();
+    },
+  }), { headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': '8' } });
+  const updates = [];
+  assert.ok(await downloadWasm('/app.wasm', p => updates.push(p)) instanceof WebAssembly.Module);
+  assert.deepEqual(updates, [{ loaded: 4, total: 8 }, { loaded: 8, total: 8 }]);
+});
+
+test('failed streaming compilation cancels the download without retrying a buffered compile', async t => {
+  const fetch = globalThis.fetch;
+  const streaming = WebAssembly.compileStreaming;
+  const compile = WebAssembly.compile;
+  t.after(() => {
+    globalThis.fetch = fetch;
+    WebAssembly.compileStreaming = streaming;
+    WebAssembly.compile = compile;
+  });
+  let canceled = false;
+  const failure = new RangeError('Out of memory');
+  globalThis.fetch = async () => new Response(new ReadableStream({
+    cancel() { canceled = true; },
+  }));
+  WebAssembly.compileStreaming = async () => { throw failure; };
+  WebAssembly.compile = () => { assert.fail('Must not retry after compilation failure'); };
+  await assert.rejects(downloadWasm('/app.wasm'), error => error === failure);
+  assert.equal(canceled, true);
+});
+
+test('WASM still loads when streaming compilation is unavailable', async t => {
+  const fetch = globalThis.fetch;
+  const streaming = WebAssembly.compileStreaming;
+  t.after(() => { globalThis.fetch = fetch; WebAssembly.compileStreaming = streaming; });
+  WebAssembly.compileStreaming = undefined;
+  globalThis.fetch = async () => new Response(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]));
+  assert.ok(await downloadWasm('/app.wasm') instanceof WebAssembly.Module);
+});

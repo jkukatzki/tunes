@@ -55,7 +55,11 @@ export function createAudioHost({ latencyHint = 'interactive' } = {}) {
 
 export class WasmInitializationError extends Error {
   constructor(cause) {
-    super(`Application initialization failed: ${cause instanceof Error ? cause.message : String(cause)}. Reload the page to try again.`, { cause });
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    const recovery = /out of memory|memory allocation failed/i.test(detail)
+      ? 'Close the app or browser completely and reopen it; reloading may not release enough memory.'
+      : 'Reload the page to try again.';
+    super(`Application initialization failed: ${detail}. ${recovery}`, { cause });
     this.name = 'WasmInitializationError';
   }
 }
@@ -78,6 +82,36 @@ export async function downloadWasm(url, onProgress = () => {}) {
     onProgress({ loaded: bytes.byteLength, total: bytes.byteLength });
     return WebAssembly.compile(bytes);
   }
+  // Feed the compiler with backpressure instead of retaining every chunk and
+  // allocating a second complete copy of a potentially 100+ MB module.
+  if (typeof WebAssembly.compileStreaming === 'function') {
+    let loaded = 0;
+    let completed = false;
+    const body = new ReadableStream({
+      async pull(controller) {
+        const { done, value } = await reader.read();
+        if (done) {
+          completed = true;
+          controller.close();
+        } else {
+          loaded += value.byteLength;
+          onProgress({ loaded, total });
+          controller.enqueue(value);
+        }
+      },
+      cancel(reason) { return reader.cancel(reason); },
+    });
+    try {
+      // The bytes are already decoded by fetch. Normalize the MIME type for
+      // cached responses and servers serving WASM as application/octet-stream.
+      return await WebAssembly.compileStreaming(new Response(body, {
+        headers: { 'Content-Type': 'application/wasm' },
+      }));
+    } finally {
+      if (!completed) await reader.cancel().catch(() => {});
+      reader.releaseLock();
+    }
+  }
   const chunks = [];
   let loaded = 0;
   try {
@@ -91,5 +125,6 @@ export async function downloadWasm(url, onProgress = () => {}) {
   const bytes = new Uint8Array(loaded);
   let offset = 0;
   for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  chunks.length = 0;
   return WebAssembly.compile(bytes);
 }

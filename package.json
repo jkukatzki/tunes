@@ -9,7 +9,8 @@
       "types": "./browser/index.d.ts",
       "default": "./browser/index.js"
     },
-    "./optimize-wasm": "./browser/optimize-wasm.mjs"
+    "./optimize-wasm": "./browser/optimize-wasm.mjs",
+    "./check-shared-memory": "./browser/check-shared-memory.mjs"
   },
   "bin": {
     "tunes-build-audio": "./browser/build-audio.mjs",

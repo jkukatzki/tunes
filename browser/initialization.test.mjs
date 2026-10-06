@@ -2,6 +2,18 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { createWasmInitializer } from './index.js';
+
+test('out-of-memory recovery does not promise that a page reload releases memory', async () => {
+  const initialize = createWasmInitializer();
+  const cause = new RangeError('Initializing game memory: Out of memory');
+  await assert.rejects(initialize(async () => { throw cause; }), error => {
+    assert.equal(error.cause, cause);
+    assert.match(error.message, /Initializing game memory/);
+    assert.match(error.message, /Close the app or browser completely/);
+    assert.doesNotMatch(error.message, /Reload the page to try again/);
+    return true;
+  });
+});
 const context = { createGameInitializer: createWasmInitializer };
 
 test('concurrent and subsequent starts initialize the game only once', async () => {

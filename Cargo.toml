@@ -67,23 +67,23 @@ worker = ["web", "dep:serde", "dep:serde_json"]
 [dependencies]
 serde = { version = "1", features = ["derive", "rc"], optional = true }
 serde_json = { version = "1", optional = true }
-cpal = { version = "0.15.3" }
+cpal = { version = "0.18.2" }
 anyhow = "1.0"
-rand = "0.9.2"
+rand = "0.9.5"
 midly = "0.5"
-notify = "6.1"
+notify = "8.2"
 inventory = "0.3"   # Distributed plugin registration for sample validation
 crossbeam = "0.8"   # Lock-free structures (epoch-based reclamation for audio callback)
-ringbuf = "0.4"     # Lock-free ring buffer for streaming audio
-dashmap = "6.1"     # Lock-free concurrent HashMap for sample cache
+ringbuf = "0.5.3"   # Lock-free ring buffer for streaming audio
+dashmap = "6.2.1"   # Lock-free concurrent HashMap for sample cache
 ahash = "0.8"       # Fast non-cryptographic hashing for cache keys
-wide = "0.7"        # SIMD vectorization for DSP performance
-rayon = "1.10"      # Data parallelism for multi-core performance
-rustfft = "6.2"     # Fast FFT library for convolution reverb
+wide = "1.7.1"     # SIMD vectorization for DSP performance
+rayon = "1.12"      # Data parallelism for multi-core performance
+rustfft = "6.4.1"   # Fast FFT library for convolution reverb
 
 # GPU acceleration (optional - enable with "gpu" feature)
 wgpu = { version = "23.0", optional = true }
-pollster = { version = "0.3", optional = true }
+pollster = { version = "1.0.1", optional = true }
 bytemuck = { version = "1.14", features = ["derive"], optional = true }
 futures-intrusive = { version = "0.5", optional = true }
 

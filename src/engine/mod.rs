@@ -298,14 +298,14 @@ impl AudioEngine {
 
     /// Create a new audio engine with default output device
     ///
-    /// Uses a moderate buffer size (4096 samples) optimized for pre-rendered playback.
-    /// Since play_mixer() pre-renders audio, buffer size only affects latency, not stability.
-    /// For lower latency, use `with_buffer_size()`.
+    /// Leaves the device buffer size at its system default. Internal rendering
+    /// uses bounded 4096-frame chunks. Use `with_buffer_size()` to request an
+    /// explicit device buffer size when supported.
     ///
     /// # Performance
     /// Default performance: 50-200x realtime (SIMD + Rayon automatic)
     pub fn new() -> Result<Self> {
-        Self::with_buffer_size_and_gpu(4096, false)
+        Self::with_system_default_buffer_size()
     }
 
     /// Create a new audio engine with GPU acceleration enabled
@@ -336,7 +336,7 @@ impl AudioEngine {
     /// - CPU fallback: Automatic if GPU unavailable
     /// - Warning: Auto-detects integrated GPUs and displays performance advisory
     pub fn new_with_gpu() -> Result<Self> {
-        Self::with_buffer_size_and_gpu(4096, true)
+        Self::with_output_buffer(cpal::BufferSize::Default, 4096, true)
     }
 
     /// Create a new audio engine with custom buffer size
@@ -354,6 +354,25 @@ impl AudioEngine {
 
     /// Create a new audio engine with custom buffer size and GPU flag (internal)
     fn with_buffer_size_and_gpu(buffer_size: u32, enable_gpu: bool) -> Result<Self> {
+        Self::with_output_buffer(
+            cpal::BufferSize::Fixed(buffer_size),
+            buffer_size,
+            enable_gpu,
+        )
+    }
+
+    /// Use the output device's current buffer size without forcing a frame count.
+    /// Internal rendering uses bounded 4096-frame chunks independently of the
+    /// device callback size. Useful for devices that reject fixed buffer sizes.
+    pub fn with_system_default_buffer_size() -> Result<Self> {
+        Self::with_output_buffer(cpal::BufferSize::Default, 4096, false)
+    }
+
+    fn with_output_buffer(
+        output_buffer: cpal::BufferSize,
+        buffer_size: u32,
+        enable_gpu: bool,
+    ) -> Result<Self> {
         let host = cpal::default_host();
         let device = host.default_output_device().ok_or_else(|| {
             TunesError::AudioEngineError("No output device available".to_string())
@@ -362,9 +381,12 @@ impl AudioEngine {
             TunesError::AudioEngineError(format!("Failed to get default config: {}", e))
         })?;
 
-        let sample_rate = config.sample_rate().0 as f32;
+        let sample_rate = config.sample_rate() as f32;
         let channels = config.channels() as usize;
-        let device_name = device.name().unwrap_or_else(|_| "Unknown".to_string());
+        let device_name = device
+            .description()
+            .map(|description| description.name().to_owned())
+            .unwrap_or_else(|_| "Unknown".to_string());
 
         // Shared state for audio callback (includes pre-allocated buffers)
         let callback_state: Arc<Mutex<AudioCallbackState>> =
@@ -389,15 +411,19 @@ impl AudioEngine {
 
         // Build stream configuration
         let mut stream_config: cpal::StreamConfig = config.clone().into();
-        // On iOS, cpal's CoreAudio backend rejects BufferSize::Fixed entirely
-        // (returns StreamConfigNotSupported).  Use Default and let iOS pick
-        // the buffer size via AVAudioSession's preferredIOBufferDuration.
+        // Preserve the application's iOS audio-session policy: leave buffer
+        // sizing to AVAudioSession rather than changing its preferred duration.
         if cfg!(target_os = "ios") {
             stream_config.buffer_size = cpal::BufferSize::Default;
         } else {
-            stream_config.buffer_size = cpal::BufferSize::Fixed(buffer_size);
+            stream_config.buffer_size = output_buffer;
         }
 
+        let output_description = format!(
+            "device={device_name:?}, sample_rate={}, channels={}, sample_format={:?}, supported_buffer={:?}, requested_buffer={:?}",
+            config.sample_rate(), channels, config.sample_format(),
+            config.buffer_size(), stream_config.buffer_size,
+        );
         let output_factory = move || {
             let callback_state_for_stream = callback_state_for_stream.clone();
             let playing_states_for_stream = playing_states_for_stream.clone();
@@ -412,7 +438,7 @@ impl AudioEngine {
             // Build the persistent output stream
             device
                 .build_output_stream(
-                    &stream_config,
+                    stream_config,
                     move |data: &mut [f32], _info: &cpal::OutputCallbackInfo| {
                         // Lock only AudioCallbackState (one lock instead of three!)
                         // If mutex is poisoned, output silence and return early
@@ -515,7 +541,9 @@ impl AudioEngine {
                     None,
                 )
                 .map_err(|e| {
-                    TunesError::AudioEngineError(format!("Failed to build output stream: {}", e))
+                    TunesError::AudioEngineError(format!(
+                        "Failed to build output stream ({output_description}): {e}"
+                    ))
                 })
         };
         let stream = output_factory()?;
@@ -587,7 +615,7 @@ impl AudioEngine {
         println!("  Device: {}", self.device_name);
         println!("  Sample rate: {} Hz", self.sample_rate as u32);
         println!(
-            "  Buffer size: {} samples ({:.1}ms latency)",
+            "  Internal render chunk: {} frames ({:.1}ms of audio; device buffer may differ)",
             self.buffer_size, latency_ms
         );
         println!("  Channels: {}", self.channels);

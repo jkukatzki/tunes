@@ -141,16 +141,10 @@ impl From<std::io::Error> for TunesError {
     }
 }
 
-// Conversion from cpal errors
-impl From<cpal::BuildStreamError> for TunesError {
-    fn from(err: cpal::BuildStreamError) -> Self {
-        TunesError::AudioEngineError(format!("Failed to build audio stream: {}", err))
-    }
-}
-
-impl From<cpal::PlayStreamError> for TunesError {
-    fn from(err: cpal::PlayStreamError) -> Self {
-        TunesError::AudioEngineError(format!("Failed to play audio stream: {}", err))
+// CPAL 0.18 uses one error type for device, stream, and playback failures.
+impl From<cpal::Error> for TunesError {
+    fn from(err: cpal::Error) -> Self {
+        TunesError::AudioEngineError(err.to_string())
     }
 }
 

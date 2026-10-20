@@ -53,7 +53,7 @@ impl LiveInput {
         Ok(Self {
             stream: None,
             writer: None,
-            sample_rate: config.sample_rate().0,
+            sample_rate: config.sample_rate(),
             channels: config.channels(),
         })
     }
@@ -105,7 +105,7 @@ impl LiveInput {
             cpal::SampleFormat::F32 => {
                 let config: cpal::StreamConfig = config.into();
                 device.build_input_stream(
-                    &config,
+                    config,
                     move |data: &[f32], _: &cpal::InputCallbackInfo| {
                         if let Ok(mut writer) = writer.lock() {
                             for &sample in data {
@@ -120,7 +120,7 @@ impl LiveInput {
             cpal::SampleFormat::I16 => {
                 let config: cpal::StreamConfig = config.into();
                 device.build_input_stream(
-                    &config,
+                    config,
                     move |data: &[i16], _: &cpal::InputCallbackInfo| {
                         if let Ok(mut writer) = writer.lock() {
                             for &sample in data {
@@ -137,7 +137,7 @@ impl LiveInput {
             cpal::SampleFormat::U16 => {
                 let config: cpal::StreamConfig = config.into();
                 device.build_input_stream(
-                    &config,
+                    config,
                     move |data: &[u16], _: &cpal::InputCallbackInfo| {
                         if let Ok(mut writer) = writer.lock() {
                             for &sample in data {

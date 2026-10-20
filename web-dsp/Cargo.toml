@@ -9,7 +9,8 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 tunes = { path = "..", features = ["worker"] }
-wasm-bindgen = "0.2"
+# Keep generated glue compatible with the frontend lockfile and packaging CLI.
+wasm-bindgen = "=0.2.128"
 
 [profile.release]
 opt-level = 3

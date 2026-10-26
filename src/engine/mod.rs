@@ -438,7 +438,7 @@ impl AudioEngine {
             // Build the persistent output stream
             device
                 .build_output_stream(
-                    stream_config,
+                    &stream_config,
                     move |data: &mut [f32], _info: &cpal::OutputCallbackInfo| {
                         // Lock only AudioCallbackState (one lock instead of three!)
                         // If mutex is poisoned, output silence and return early

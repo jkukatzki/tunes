@@ -67,7 +67,8 @@ worker = ["web", "dep:serde", "dep:serde_json"]
 [dependencies]
 serde = { version = "1", features = ["derive", "rc"], optional = true }
 serde_json = { version = "1", optional = true }
-cpal = { version = "0.18.2" }
+# Match Bevy/rodio to avoid duplicate wasm-bindgen exports in the game.
+cpal = { version = "0.17.3" }
 anyhow = "1.0"
 rand = "0.9.5"
 midly = "0.5"

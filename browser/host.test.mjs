@@ -47,6 +47,14 @@ test('failed bridge import can still release unlocked context and listeners', as
   assert.equal(host.context.state, 'closed');
   assert.equal(events.size, 0); assert.equal(session.type, 'auto');
 });
+test('closing after a failed install releases the context once without rethrowing', async t => {
+  const { calls } = environment(t);
+  const host = createAudioHost();
+  const url = 'data:text/javascript,export async function installWorkerAudio() { throw new Error("worklet failed"); }';
+  await assert.rejects(host.install(url), /worklet failed/);
+  await host.close();
+  assert.equal(calls.filter(c => c[0] === 'close').length, 1);
+});
 test('invalid storage schemas do not prevent startup', t => {
   environment(t);
   for (const saved of ['bad', 'null', '{}', '{"hint":"invalid"}']) {

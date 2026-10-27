@@ -32,9 +32,12 @@ export async function createWorkerAudio({
   backend = "worklet",
   muted = false,
   signal,
-  context = new AudioContext({ latencyHint: "interactive" }),
+  context: providedContext,
 } = {}) {
   if (backend !== "worklet") throw new Error("Only AudioWorklet output is supported");
+  // Whoever creates the context closes it on failure. A provided context
+  // belongs to the caller (e.g. one unlocked in a user gesture by the host).
+  const context = providedContext ?? new AudioContext({ latencyHint: "interactive" });
   const blockFrames = 128;
   const report = data => onHealth?.(data);
   const asset = (name) => {
@@ -230,7 +233,7 @@ export async function createWorkerAudio({
     clearTimeout(timer);
     endpoint?.terminate();
     node?.disconnect();
-    void context.close().catch(console.warn);
+    if (!providedContext) await context.close().catch(console.warn);
     throw error;
   }
   const valid = (s) => !closed && !fatal && s === session;
@@ -541,16 +544,22 @@ export async function installWorkerAudio(options) {
   installing = true;
   let audio;
   try {
-    const initial = await createWorkerAudio({
-      ...options,
-      context: options?.context ?? new AudioContext({ latencyHint: options?.latencyHint ?? "interactive" }),
-    });
+    const context = options?.context ?? new AudioContext({ latencyHint: options?.latencyHint ?? "interactive" });
+    let initial;
+    try { initial = await createWorkerAudio({ ...options, context }); }
+    catch (error) {
+      if (!options?.context) await context.close().catch(console.warn);
+      throw error;
+    }
     audio = restartableAudio(initial, async (latencyHint, sampleRate, signal) => {
+      // Restart contexts are owned here: closed once on abort or failure.
       const context = new AudioContext({ latencyHint, sampleRate });
-      const cancel = () => { void context.close().catch(console.warn); };
-      signal.addEventListener('abort', cancel, { once: true });
+      let closing;
+      const close = () => (closing ??= context.close().catch(console.warn));
+      signal.addEventListener('abort', close, { once: true });
       try { return await createWorkerAudio({ ...options, context, muted: true, signal }); }
-      finally { signal.removeEventListener('abort', cancel); }
+      catch (error) { await close(); throw error; }
+      finally { signal.removeEventListener('abort', close); }
     }, options?.latencyHint ?? "interactive");
   } finally {
     installing = false;

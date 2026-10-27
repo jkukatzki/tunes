@@ -292,6 +292,18 @@ test("frozen running context gets one recovery cycle, then a gesture can retry",
   assert.equal(timers.size, 0);
 });
 
+test("a provided context is left to its owner when the worklet fails to load", async () => {
+  let closes = 0;
+  const context = {
+    state: "running", currentTime: 0, sampleRate: 44100, destination: {},
+    audioWorklet: { async addModule() { throw new Error("export declarations may only appear at top level of a module"); } },
+    async resume() {}, async suspend() {},
+    async close() { closes++; this.state = "closed"; },
+  };
+  await assert.rejects(setup({ context }), /top level of a module/);
+  assert.equal(closes, 0);
+});
+
 test("removed worker backend is rejected explicitly", async () => {
   await assert.rejects(setup({ backend: "worker" }), /Only AudioWorklet/);
 });

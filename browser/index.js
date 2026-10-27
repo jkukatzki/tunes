@@ -47,8 +47,12 @@ export function createAudioHost({ latencyHint = 'interactive' } = {}) {
       if (closed) return;
       closed = true;
       releaseSession();
-      try { const audio = await installed; if (audio) await audio.close(); }
-      finally { if (context.state !== 'closed') await context.close(); }
+      // A failed install was already reported by install(); closing only releases.
+      const audio = await installed?.catch(() => undefined);
+      try { if (audio) await audio.close(); }
+      // The host created this context, so it owns closing it. `state` updates
+      // asynchronously after close(), so it cannot prove a close is pending.
+      finally { if (context.state !== 'closed') await context.close().catch(() => {}); }
     },
   };
 }
